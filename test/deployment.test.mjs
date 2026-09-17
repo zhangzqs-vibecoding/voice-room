@@ -36,3 +36,8 @@ test('CI 验证安装、测试、类型检查、lint、构建和部署配置', a
     assert.match(workflow, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
+
+test('API 镜像以 pnpm 10 兼容模式部署生产依赖', async () => {
+  const dockerfile = await text('deploy/Dockerfile.api');
+  assert.match(dockerfile, /pnpm --filter @voice-room\/api --prod deploy --legacy \/app/);
+});
