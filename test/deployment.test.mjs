@@ -19,6 +19,12 @@ test('本地 Compose 以环境变量启动 Redis、LiveKit 和 API，且不发�
   assert.doesNotMatch(compose, /^\s*-\s*["']?6379:6379/m);
 });
 
+test('本地 Caddy 在 SPA 回退前将 API 请求反代给业务服务', async () => {
+  const caddy = await text('deploy/Caddyfile.local');
+  assert.match(caddy, /route\s*\{/);
+  assert.ok(caddy.indexOf('handle /api/*') < caddy.indexOf('try_files'), 'API 路由必须先于 SPA 回退');
+});
+
 test('LiveKit 配置包含开发 Redis、ICE 回退和 TURN 端口，密钥由 CLI 注入', async () => {
   const config = await text('deploy/livekit.yaml');
   assert.match(config, /address: redis:6379/);
