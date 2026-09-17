@@ -1,6 +1,12 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { loadServerConfig } from '../src/config.js';
+
+const execFileAsync = promisify(execFile);
 
 const environment = {
   LIVEKIT_URL: 'wss://livekit.example.test',
@@ -43,9 +49,28 @@ describe('server configuration', () => {
     expect(() => loadServerConfig({ ...environment, LIVEKIT_API_SECRET: '' })).toThrow('Missing required environment variable: LIVEKIT_API_SECRET');
   });
 
-  it('uses Node env-file loading for development and production scripts', async () => {
+  it('loads the root env file when Node starts from the API directory', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'voice-room-env-'));
+    const apiDirectory = join(fixtureRoot, 'apps', 'api');
+    await mkdir(apiDirectory, { recursive: true });
+    await writeFile(join(fixtureRoot, '.env'), 'LIVEKIT_API_KEY=fixture-key\n');
+    try {
+      const { stdout } = await execFileAsync(process.execPath, [
+        '--env-file=../../.env',
+        '--input-type=module',
+        '--eval',
+        'process.stdout.write(process.env.LIVEKIT_API_KEY ?? "")'
+      ], { cwd: apiDirectory });
+      expect(stdout).toBe('fixture-key');
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the root env file in development and production scripts', async () => {
     const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-    expect(packageJson.scripts.dev).toContain('--env-file=.env');
-    expect(packageJson.scripts.start).toContain('--env-file=.env');
+    expect(packageJson.scripts.dev).toContain('--env-file=../../.env');
+    expect(packageJson.scripts.dev).toContain('--import tsx');
+    expect(packageJson.scripts.start).toContain('--env-file=../../.env');
   });
 });
