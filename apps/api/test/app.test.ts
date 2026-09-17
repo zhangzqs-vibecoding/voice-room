@@ -24,9 +24,17 @@ class FakeLiveKitGateway implements LiveKitGateway {
   }
 }
 
-const buildApp = () => {
+const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
   const livekit = new FakeLiveKitGateway();
-  return { app: createApp({ config, livekit, roomId: () => 'room_abcdefghijklmnopqrstuv' }), livekit };
+  return {
+    app: createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 }, ...overrides.config },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      ...overrides
+    }),
+    livekit
+  };
 };
 
 describe('voice room API', () => {
@@ -120,6 +128,43 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('rejects a join after the room link has expired five minutes after creation', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    currentTime = 300_000;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: 'room_not_found' });
+    await app.close();
+  });
+
+  it('issues at most ten join credentials for a room', async () => {
+    const { app } = buildApp();
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    const responses = await Promise.all(
+      Array.from({ length: 11 }, (_, index) => app.inject({
+        method: 'POST',
+        url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+        payload: { nickname: `member-${index}`, avatarId: 'fox' }
+      }))
+    );
+    expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
+    expect(responses[10]?.statusCode).toBe(409);
+    expect(responses[10]?.json()).toEqual({ error: 'room_full' });
+    await app.close();
+  });
+
   it('maps LiveKit room creation failures without exposing internals', async () => {
     const { app, livekit } = buildApp();
     livekit.shouldFailCreate = true;
@@ -130,7 +175,7 @@ describe('voice room API', () => {
   });
 
   it('rate limits repeated mutating requests from the same client IP', async () => {
-    const { app } = buildApp();
+    const { app } = buildApp({ config });
     const responses = await Promise.all(Array.from({ length: 4 }, () => app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.8' })));
     expect(responses.filter((response) => response.statusCode === 201)).toHaveLength(3);
     expect(responses.at(-1)?.statusCode).toBe(429);

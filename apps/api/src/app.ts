@@ -33,6 +33,14 @@ export interface CreateAppOptions {
 
 const ROOM_ID_PATTERN = /^room_[a-z0-9]{20,}$/;
 const MUTATING_METHODS = new Set(['POST']);
+const ROOM_LINK_LIFETIME_MS = 300_000;
+const MAX_PARTICIPANTS = 10;
+
+interface RoomState {
+  expiresAt: number;
+  issuedParticipants: number;
+  reservedParticipants: number;
+}
 
 const defaultRoomId = () => `room_${randomBytes(16).toString('hex')}`;
 const defaultParticipantId = () => `participant_${randomBytes(16).toString('hex')}`;
@@ -50,7 +58,7 @@ const parseJoin = (body: unknown): { nickname: string; avatarId: AvatarId } | un
 
 export const createApp = (options: CreateAppOptions): FastifyInstance => {
   const app = Fastify({ logger: false });
-  const knownRooms = new Set<string>();
+  const knownRooms = new Map<string, RoomState>();
   const requestTimes = new Map<string, number[]>();
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
@@ -74,8 +82,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     const roomId = createRoomId();
     if (!ROOM_ID_PATTERN.test(roomId)) return reply.code(502).send({ error: 'room_service_unavailable' });
     try {
-      await options.livekit.createRoom({ name: roomId, maxParticipants: 10, emptyTimeout: 300, departureTimeout: 300 });
-      knownRooms.add(roomId);
+      await options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 });
+      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, issuedParticipants: 0, reservedParticipants: 0 });
       return reply.code(201).send({ roomId });
     } catch {
       return reply.code(502).send({ error: 'room_service_unavailable' });
@@ -84,12 +92,20 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 
   app.post('/api/rooms/:roomId/join', async (request, reply) => {
     const { roomId } = request.params as { roomId: string };
-    if (!knownRooms.has(roomId)) return reply.code(404).send({ error: 'room_not_found' });
+    const room = knownRooms.get(roomId);
+    if (!room || now() >= room.expiresAt) {
+      knownRooms.delete(roomId);
+      return reply.code(404).send({ error: 'room_not_found' });
+    }
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
+    if (room.issuedParticipants + room.reservedParticipants >= MAX_PARTICIPANTS) {
+      return reply.code(409).send({ error: 'room_full' });
+    }
 
     const participantId = createParticipantId();
     const metadata = JSON.stringify(identity);
+    room.reservedParticipants += 1;
     try {
       const token = await options.livekit.createAccessToken({
         participantId,
@@ -98,8 +114,11 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         grants: { roomJoin: true, canPublish: true, canSubscribe: true },
         ttlSeconds: options.config.tokenTtlSeconds
       });
+      room.reservedParticipants -= 1;
+      room.issuedParticipants += 1;
       return { participantId, livekitUrl: options.config.livekitUrl, token };
     } catch {
+      room.reservedParticipants -= 1;
       return reply.code(502).send({ error: 'token_service_unavailable' });
     }
   });

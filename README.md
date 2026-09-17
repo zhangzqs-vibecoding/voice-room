@@ -19,6 +19,10 @@ pnpm --filter @voice-room/api dev
 API 监听 `http://localhost:3000`，健康检查为 `GET /health`。创建房间和加入房间的接口
 只在服务器端使用 LiveKit 密钥，浏览器响应只会得到短期入房 token。
 
+API 创建的邀请链接在创建后 5 分钟失效；这是业务服务的固定链接过期策略，并不试图
+从 SFU 精确侦测成员何时离开。API 会在签发 token 时最多接纳 10 人，LiveKit 的
+`maxParticipants` 仍是实际加入房间时的最终容量限制。
+
 运行验证：
 
 ```sh
