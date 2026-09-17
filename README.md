@@ -21,8 +21,11 @@ API 监听 `http://localhost:3000`，健康检查为 `GET /health`。创建房�
 
 API 在加入审核时检查 5 分钟生命周期：到期且 SFU 房间已不存在时才失效；只要 LiveKit
 仍保留该房间（包括最后离开后的 departure timeout），便在审核点续期 5 分钟。服务不
-声称实时侦测未来的离开事件。API 会在签发 token 时最多接纳 10 人，LiveKit 的
-`maxParticipants` 仍是实际加入房间时的最终容量限制。
+声称实时侦测未来的离开事件。API 仅在 JWT 同时签名时最多保留 10 个槽位，签名完成就
+释放；LiveKit 的 `maxParticipants` 是实际在线人数的最终容量限制。
+
+本地开发保持 `TRUST_PROXY=false`。部署在 Caddy 等受信任反向代理之后时，将根 `.env`
+中的 `TRUST_PROXY` 设为 `true`，使限流按转发客户端 IP 生效。
 
 运行验证：
 

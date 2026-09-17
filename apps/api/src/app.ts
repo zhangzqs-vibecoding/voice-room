@@ -27,6 +27,8 @@ export interface ApiConfig {
   apiKey: string;
   apiSecret: string;
   tokenTtlSeconds: number;
+  roomCacheMaxEntries: number;
+  trustProxy: boolean;
   rateLimit: { max: number; timeWindowMs: number; maxKeys: number };
 }
 
@@ -45,9 +47,16 @@ const MAX_PARTICIPANTS = 10;
 
 interface RoomState {
   expiresAt: number;
-  issuedParticipants: number;
   reservedParticipants: number;
 }
+
+interface RateLimitEntry {
+  count: number;
+  expiresAt: number;
+}
+
+const ROOM_SWEEP_BATCH_SIZE = 25;
+const RATE_LIMIT_SWEEP_BATCH_SIZE = 10;
 
 const defaultRoomId = () => `room_${randomBytes(16).toString('hex')}`;
 const defaultParticipantId = () => `participant_${randomBytes(16).toString('hex')}`;
@@ -64,41 +73,74 @@ const parseJoin = (body: unknown): { nickname: string; avatarId: AvatarId } | un
 };
 
 export const createApp = (options: CreateAppOptions): FastifyInstance => {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, trustProxy: options.config.trustProxy });
   const knownRooms = new Map<string, RoomState>();
-  const requestTimes = new Map<string, number[]>();
+  const rateLimits = new Map<string, RateLimitEntry>();
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
   const now = options.now ?? Date.now;
 
+  const sweepKnownRooms = async (): Promise<void> => {
+    const sweepTime = now();
+    let visited = 0;
+    for (const [roomId, room] of knownRooms) {
+      if (visited >= ROOM_SWEEP_BATCH_SIZE) return;
+      visited += 1;
+      if (room.expiresAt > sweepTime) continue;
+      try {
+        if (await options.livekit.roomExists(roomId)) room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;
+        else knownRooms.delete(roomId);
+      } catch {
+        // Keep the room on transient SFU errors; join will report the service error if needed.
+      }
+    }
+  };
+
+  const sweepRateLimits = (sweepTime: number): void => {
+    let visited = 0;
+    for (const [address, entry] of rateLimits) {
+      if (visited >= RATE_LIMIT_SWEEP_BATCH_SIZE) return;
+      visited += 1;
+      if (entry.expiresAt <= sweepTime) rateLimits.delete(address);
+    }
+  };
+
+  app.setErrorHandler((error, _request, reply) => {
+    const details = error as { code?: unknown; statusCode?: unknown; validation?: unknown };
+    const statusCode = typeof details.statusCode === 'number' ? details.statusCode : 500;
+    if (details.code === 'FST_ERR_CTP_INVALID_JSON_BODY') return reply.code(statusCode).send({ error: 'invalid_json' });
+    if (details.validation !== undefined) return reply.code(statusCode).send({ error: 'invalid_request' });
+    return reply.code(statusCode >= 400 && statusCode < 500 ? statusCode : 500).send({ error: 'internal_error' });
+  });
+
   app.addHook('onRequest', async (request, reply) => {
     if (!MUTATING_METHODS.has(request.method)) return;
     const key = clientAddress(request);
-    const after = now() - options.config.rateLimit.timeWindowMs;
-    for (const [address, times] of requestTimes) {
-      const recentTimes = times.filter((time) => time > after);
-      if (recentTimes.length === 0) requestTimes.delete(address);
-      else requestTimes.set(address, recentTimes);
-    }
-    const recent = requestTimes.get(key) ?? [];
-    if (recent.length === 0 && requestTimes.size >= options.config.rateLimit.maxKeys) {
+    const requestTime = now();
+    sweepRateLimits(requestTime);
+    const existing = rateLimits.get(key);
+    if (existing && existing.expiresAt <= requestTime) rateLimits.delete(key);
+    const current = rateLimits.get(key);
+    if (!current && rateLimits.size >= options.config.rateLimit.maxKeys) {
       return reply.code(429).send({ error: 'rate_limited' });
     }
-    if (recent.length >= options.config.rateLimit.max) {
+    if (current && current.count >= options.config.rateLimit.max) {
       return reply.code(429).send({ error: 'rate_limited' });
     }
-    recent.push(now());
-    requestTimes.set(key, recent);
+    if (current) current.count += 1;
+    else rateLimits.set(key, { count: 1, expiresAt: requestTime + options.config.rateLimit.timeWindowMs });
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.post('/api/rooms', async (_request, reply) => {
+    await sweepKnownRooms();
+    if (knownRooms.size >= options.config.roomCacheMaxEntries) return reply.code(503).send({ error: 'room_cache_full' });
     const roomId = createRoomId();
     if (!ROOM_ID_PATTERN.test(roomId)) return reply.code(502).send({ error: 'room_service_unavailable' });
     try {
       await options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 });
-      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, issuedParticipants: 0, reservedParticipants: 0 });
+      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0 });
       return reply.code(201).send({ roomId });
     } catch {
       return reply.code(502).send({ error: 'room_service_unavailable' });
@@ -106,6 +148,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   });
 
   app.post('/api/rooms/:roomId/join', async (request, reply) => {
+    await sweepKnownRooms();
     const { roomId } = request.params as { roomId: string };
     const room = knownRooms.get(roomId);
     if (!room) return reply.code(404).send({ error: 'room_not_found' });
@@ -128,7 +171,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     }
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
-    if (room.issuedParticipants + room.reservedParticipants >= MAX_PARTICIPANTS) {
+    if (room.reservedParticipants >= MAX_PARTICIPANTS) {
       return reply.code(409).send({ error: 'room_full' });
     }
 
@@ -146,7 +189,6 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         expiresAtMs: room.expiresAt
       });
       room.reservedParticipants -= 1;
-      room.issuedParticipants += 1;
       return { participantId, livekitUrl: options.config.livekitUrl, token };
     } catch (error) {
       room.reservedParticipants -= 1;

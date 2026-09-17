@@ -7,6 +7,8 @@ const config = {
   apiKey: 'key',
   apiSecret: 'secret',
   tokenTtlSeconds: 900,
+  roomCacheMaxEntries: 1_000,
+  trustProxy: false,
   rateLimit: { max: 3, timeWindowMs: 60_000, maxKeys: 1_000 }
 };
 
@@ -17,6 +19,8 @@ class FakeLiveKitGateway implements LiveKitGateway {
   shouldFailToken = false;
   shouldExpireToken = false;
   roomStillExists = false;
+  deferTokenSigning = false;
+  private readonly pendingTokenResolutions: Array<() => void> = [];
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -27,7 +31,14 @@ class FakeLiveKitGateway implements LiveKitGateway {
     if (this.shouldFailToken) throw new Error('LiveKit token signing unavailable');
     if (this.shouldExpireToken) throw Object.assign(new Error('Room expired while signing'), { code: 'room_expired' });
     this.createdTokens.push(input);
+    if (this.deferTokenSigning) {
+      await new Promise<void>((resolve) => this.pendingTokenResolutions.push(resolve));
+    }
     return JSON.stringify(input);
+  }
+
+  finishPendingTokenSignatures() {
+    for (const resolve of this.pendingTokenResolutions.splice(0)) resolve();
   }
 
   async roomExists() {
@@ -158,6 +169,19 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('returns a stable malformed JSON error without parser details', async () => {
+    const { app } = buildApp();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms',
+      headers: { 'content-type': 'application/json' },
+      payload: '{"broken":'
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'invalid_json' });
+    await app.close();
+  });
+
   it('rejects joins to a room the API did not create', async () => {
     const { app } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: 'Lee', avatarId: 'fox' } });
@@ -277,12 +301,12 @@ describe('voice room API', () => {
       payload: { nickname: 'recovered', avatarId: 'fox' }
     });
     expect(recovered.statusCode).toBe(200);
-    const full = await app.inject({
+    const additionalReconnect = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
       payload: { nickname: 'extra', avatarId: 'fox' }
     });
-    expect(full.statusCode).toBe(409);
+    expect(additionalReconnect.statusCode).toBe(200);
     await app.close();
   });
 
@@ -307,19 +331,31 @@ describe('voice room API', () => {
     await app.close();
   });
 
-  it('issues at most ten join credentials for a room', async () => {
-    const { app } = buildApp();
+  it('limits concurrent signing reservations and permits reconnect after they release', async () => {
+    const { app, livekit } = buildApp();
+    livekit.deferTokenSigning = true;
     await app.inject({ method: 'POST', url: '/api/rooms' });
-    const responses = await Promise.all(
-      Array.from({ length: 11 }, (_, index) => app.inject({
+    const pendingResponses = Array.from({ length: 11 }, (_, index) => app.inject({
         method: 'POST',
         url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
         payload: { nickname: `member-${index}`, avatarId: 'fox' }
-      }))
-    );
+      }));
+    for (let attempt = 0; attempt < 10 && livekit.createdTokens.length < 10; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(livekit.createdTokens).toHaveLength(10);
+    livekit.finishPendingTokenSignatures();
+    const responses = await Promise.all(pendingResponses);
     expect(responses.slice(0, 10).every((response) => response.statusCode === 200)).toBe(true);
     expect(responses[10]?.statusCode).toBe(409);
     expect(responses[10]?.json()).toEqual({ error: 'room_full' });
+    livekit.deferTokenSigning = false;
+    const reconnect = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'reconnect', avatarId: 'fox' }
+    });
+    expect(reconnect.statusCode).toBe(200);
     await app.close();
   });
 
@@ -357,6 +393,63 @@ describe('voice room API', () => {
     currentTime = 101;
     const afterCleanup = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.3' });
     expect(afterCleanup.statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('uses forwarded addresses only when TRUST_PROXY is enabled', async () => {
+    const disabled = createApp({
+      config: { ...config, trustProxy: false, roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
+      livekit: new FakeLiveKitGateway()
+    });
+    const disabledFirst = await disabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.1' } });
+    const disabledSecond = await disabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.2' } });
+    expect(disabledFirst.statusCode).toBe(201);
+    expect(disabledSecond.statusCode).toBe(429);
+    await disabled.close();
+
+    const enabled = createApp({
+      config: { ...config, trustProxy: true, roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
+      livekit: new FakeLiveKitGateway()
+    });
+    const enabledFirst = await enabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.1' } });
+    const enabledSecond = await enabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.2' } });
+    expect(enabledFirst.statusCode).toBe(201);
+    expect(enabledSecond.statusCode).toBe(201);
+    await enabled.close();
+  });
+
+  it('sweeps expired missing rooms before creating a new cached room', async () => {
+    const roomIds = ['room_aaaaaaaaaaaaaaaaaaaa', 'room_bbbbbbbbbbbbbbbbbbbb'];
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, trustProxy: false, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_cccccccccccccccccccc',
+      now: () => currentTime
+    });
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    currentTime = 300_000;
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('retains an expired SFU room and rejects creation when the room cache is full', async () => {
+    const roomIds = ['room_aaaaaaaaaaaaaaaaaaaa', 'room_bbbbbbbbbbbbbbbbbbbb'];
+    const livekit = new FakeLiveKitGateway();
+    livekit.roomStillExists = true;
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, trustProxy: false, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_cccccccccccccccccccc',
+      now: () => currentTime
+    });
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    currentTime = 300_000;
+    const response = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: 'room_cache_full' });
     await app.close();
   });
 });

@@ -16,6 +16,8 @@ const environment = {
   RATE_LIMIT_MAX: '30',
   RATE_LIMIT_WINDOW_MS: '60000',
   RATE_LIMIT_MAX_KEYS: '1000',
+  MAX_KNOWN_ROOMS: '100',
+  TRUST_PROXY: 'false',
   PORT: '3000'
 };
 
@@ -26,7 +28,9 @@ describe('server configuration', () => {
       apiConfig: {
         livekitUrl: 'wss://livekit.example.test/',
         tokenTtlSeconds: 900,
-        rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1000 }
+        rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1000 },
+        roomCacheMaxEntries: 100,
+        trustProxy: false
       }
     });
   });
@@ -36,13 +40,18 @@ describe('server configuration', () => {
     ['LIVEKIT_TOKEN_TTL_SECONDS', '0'],
     ['RATE_LIMIT_MAX', 'NaN'],
     ['RATE_LIMIT_WINDOW_MS', '-1'],
-    ['RATE_LIMIT_MAX_KEYS', '1.5']
+    ['RATE_LIMIT_MAX_KEYS', '1.5'],
+    ['MAX_KNOWN_ROOMS', '0']
   ])('rejects an invalid positive integer for %s', (name, value) => {
     expect(() => loadServerConfig({ ...environment, [name]: value })).toThrow(`${name} must be a positive integer`);
   });
 
   it('rejects a non-WebSocket LiveKit URL', () => {
     expect(() => loadServerConfig({ ...environment, LIVEKIT_URL: 'https://livekit.example.test' })).toThrow('LIVEKIT_URL must be a ws or wss URL');
+  });
+
+  it('rejects an invalid TRUST_PROXY value', () => {
+    expect(() => loadServerConfig({ ...environment, TRUST_PROXY: 'yes' })).toThrow('TRUST_PROXY must be true or false');
   });
 
   it('requires every LiveKit credential', () => {
