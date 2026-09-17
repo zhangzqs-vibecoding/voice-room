@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, Room } from '../src/App.js';
@@ -73,5 +73,17 @@ describe('房间成员模型', () => {
     await act(async () => { select.value = 'line'; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(changed).toHaveBeenCalledWith('line');
     expect(session.switchDevice).toHaveBeenCalledOnce();
+  });
+
+  it('房内切换设备不重建 LiveKit 会话', async () => {
+    const session: SessionAdapter = { connect: vi.fn(), publish: vi.fn(), setMuted: vi.fn(), switchDevice: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(() => () => undefined) };
+    const Harness = () => { const [deviceId, setDeviceId] = useState('usb'); return <Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly={false} members={[]} deviceId={deviceId} devices={[{ deviceId: 'usb', label: 'USB' }, { deviceId: 'line', label: 'Line' }]} credentials={{ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }} sessionFactory={() => session} onDeviceChange={setDeviceId} onLeave={vi.fn()} />; };
+    host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<Harness />); });
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')!;
+    await act(async () => { select.value = 'line'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(session.switchDevice).toHaveBeenCalledOnce();
+    expect(session.connect).toHaveBeenCalledOnce();
+    expect(session.disconnect).not.toHaveBeenCalled();
   });
 });

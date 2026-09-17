@@ -62,15 +62,17 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   const [muted, setMuted] = useState(false);
   const [state, setState] = useState<SessionState>({ connection: credentials ? 'connecting' : 'connected', activeSpeakerIds: [], localSpeaking: false, members: [] });
   const session = useRef<AudioSession | undefined>(undefined);
+  const sessionFactoryRef = useRef(sessionFactory);
+  sessionFactoryRef.current = sessionFactory;
   useEffect(() => {
     if (!credentials) return;
-    const next = new AudioSession(sessionFactory(), setState); session.current = next;
+    const next = new AudioSession(sessionFactoryRef.current(), setState); session.current = next;
     void next.enter({ ...credentials, listenOnly, mode, deviceId }).catch(() => undefined);
     return () => { void next.leave().catch(() => undefined); };
-  }, [credentials, deviceId, listenOnly, mode, sessionFactory]);
+  }, [credentials?.livekitUrl, credentials?.participantId, credentials?.token]);
   const visibleMembers: Member[] = [...members, ...state.members.map((member) => ({ ...member, avatarId: AVATARS.some((avatar) => avatar.id === member.avatarId) ? member.avatarId as AvatarId : 'fox', speaking: state.activeSpeakerIds.includes(member.id) }))];
   const self: Member = { id: 'self', name: nickname, avatarId, speaking: !muted && state.localSpeaking };
-  const leave = () => { void session.current?.leave(); onLeave(); };
+  const leave = async () => { await session.current?.leave(); onLeave(); };
   const toggleMute = () => { const next = !muted; setMuted(next); void session.current?.setMuted(next); };
   const changeDevice = (nextDeviceId: string) => { onDeviceChange?.(nextDeviceId); void session.current?.switchDevice(nextDeviceId, mode); };
   return <main className="console room"><header><p className="eyebrow">ROOM / {roomId}</p><h1>声场已接通</h1><p className="subtitle">{state.connection === 'reconnecting' ? '正在恢复连接…' : state.connection === 'disconnected' ? '连接已断开' : listenOnly ? '仅收听 · 已连接 RTC 音频' : 'RTC 音频已连接'}</p></header>{!listenOnly && <div className="input-grid room-device"><label>麦克风设备<select aria-label="房内麦克风设备" value={deviceId} onChange={(event) => changeDevice(event.target.value)}><option value="">自动选择</option>{devices.map((device) => <option value={device.deviceId} key={device.deviceId}>{device.label}</option>)}</select></label><button className="refresh" onClick={onRefreshDevices}>↻ 刷新设备</button></div>}<section className="participants" aria-label="房间成员">{[self, ...visibleMembers].map((member) => { const avatar = AVATARS.find((item) => item.id === member.avatarId)!; const isSelf = member.id === 'self'; return <article className="participant" key={member.id} data-speaking={member.speaking}><div className="portrait">{avatar.icon}</div><div><b>{member.name}{isSelf ? '（我）' : ''}</b><p>{isSelf ? (listenOnly ? '仅收听' : muted ? '已静音' : member.speaking ? '正在发言' : '静默') : member.speaking ? '正在发言' : '静默'}</p></div>{member.speaking && <span className="meter" aria-label={`${member.name} 正在发言`}>●</span>}</article>; })}</section><div className="actions">{state.connection === 'disconnected' && onReconnect && <button className="primary" onClick={onReconnect}>重新入场</button>}{!listenOnly && <button className="outline" onClick={toggleMute} aria-pressed={muted}>{muted ? '解除静音' : '静音'}</button>}<button className="danger" onClick={leave}>离开房间</button></div></main>;

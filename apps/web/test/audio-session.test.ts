@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AudioSession, instrumentConstraints, voiceConstraints, type SessionAdapter, type SessionEvent } from '../src/audio-session.js';
 import { publishOptions } from '../src/livekit-session.js';
+import { AudioPresets } from 'livekit-client';
 
 const adapter = (): SessionAdapter & { emit: (event: SessionEvent) => void } => {
   let listener: ((event: SessionEvent) => void) | undefined;
@@ -21,7 +22,7 @@ describe('音频采集参数', () => {
   });
 
   it('乐器发布锁定高质量立体声预设并关闭 DTX', () => {
-    expect(publishOptions(instrumentConstraints('line'))).toMatchObject({ forceStereo: true, dtx: false, red: true, audioPreset: { maxBitrate: expect.any(Number) } });
+    expect(publishOptions(instrumentConstraints('line'))).toMatchObject({ forceStereo: true, dtx: false, red: true, audioPreset: AudioPresets.musicHighQualityStereo });
   });
 });
 
