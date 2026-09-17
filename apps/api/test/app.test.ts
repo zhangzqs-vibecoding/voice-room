@@ -578,4 +578,72 @@ describe('voice room API', () => {
     expect(response.json()).toEqual({ error: 'room_cache_full' });
     await app.close();
   });
+
+  it('keeps completed sweep results when other expired room lookups time out', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 26 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 25, roomSweepTimeoutMs: 15, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    for (let index = 0; index < 25; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    for (const room of livekit.createdRooms.slice(0, 24)) livekit.slowRoomIds.add(room.name as string);
+    livekit.roomExistsDelayMs = 50;
+    currentTime = 300_000;
+    const response = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(response.statusCode).toBe(201);
+    expect(livekit.createdRooms).toHaveLength(26);
+    await app.close();
+  });
+
+  it('rotates timed-out sweep candidates so a later missing room frees cache capacity', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 28 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 26, roomSweepTimeoutMs: 15, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    for (let index = 0; index < 26; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    for (const room of livekit.createdRooms.slice(0, 25)) livekit.slowRoomIds.add(room.name as string);
+    livekit.roomExistsDelayMs = 50;
+    currentTime = 300_000;
+    const first = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const second = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(first.statusCode).toBe(503);
+    expect(second.statusCode).toBe(201);
+    expect(livekit.createdRooms).toHaveLength(27);
+    await app.close();
+  });
+
+  it('does not exceed cache capacity while a post-sweep creation remains pending', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 5 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 2, roomSweepTimeoutMs: 15, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    livekit.slowRoomIds.add(livekit.createdRooms[1]?.name as string);
+    livekit.roomExistsDelayMs = 50;
+    livekit.deferRoomCreation = true;
+    currentTime = 300_000;
+    const pending = app.inject({ method: 'POST', url: '/api/rooms' });
+    for (let attempt = 0; attempt < 20 && livekit.createdRooms.length < 3; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    const concurrent = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(livekit.createdRooms).toHaveLength(3);
+    expect(concurrent.statusCode).toBe(503);
+    livekit.finishPendingRoomCreations();
+    expect((await pending).statusCode).toBe(201);
+    await app.close();
+  });
 });

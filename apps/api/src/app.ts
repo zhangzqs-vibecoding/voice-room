@@ -81,35 +81,49 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   const knownRooms = new Map<string, RoomState>();
   const rateLimits = new Map<string, RateLimitEntry>();
   let pendingCreates = 0;
+  let roomSweepCursor = 0;
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
   const now = options.now ?? Date.now;
 
   const sweepKnownRooms = async (): Promise<void> => {
     const sweepTime = now();
-    const candidates = [...knownRooms.entries()]
-      .filter(([, room]) => room.expiresAt <= sweepTime)
-      .slice(0, ROOM_SWEEP_BATCH_SIZE);
-    if (candidates.length === 0) return;
-    const lookups = Promise.all(candidates.map(async ([roomId, room]) => {
-      try {
-        return { roomId, room, exists: await options.livekit.roomExists(roomId) };
-      } catch {
-        return undefined;
-      }
-    }));
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const results = await Promise.race([
-      lookups,
-      new Promise<undefined>((resolve) => { timeout = setTimeout(() => resolve(undefined), options.config.roomSweepTimeoutMs); })
-    ]);
-    if (timeout !== undefined) clearTimeout(timeout);
-    if (!results) return;
-    for (const result of results) {
-      if (!result) continue;
-      if (result.exists) result.room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;
-      else knownRooms.delete(result.roomId);
+    const expiredRooms = [...knownRooms.entries()].filter(([, room]) => room.expiresAt <= sweepTime);
+    if (expiredRooms.length === 0) {
+      roomSweepCursor = 0;
+      return;
     }
+    const start = roomSweepCursor % expiredRooms.length;
+    const candidates = Array.from(
+      { length: Math.min(ROOM_SWEEP_BATCH_SIZE, expiredRooms.length) },
+      (_, index) => expiredRooms[(start + index) % expiredRooms.length]!
+    );
+    roomSweepCursor = (start + candidates.length) % expiredRooms.length;
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      let remaining = candidates.length;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const timeout = setTimeout(finish, options.config.roomSweepTimeoutMs);
+      for (const [roomId, room] of candidates) {
+        void Promise.resolve()
+          .then(() => options.livekit.roomExists(roomId))
+          .then((exists) => {
+            if (finished || knownRooms.get(roomId) !== room) return;
+            if (exists) room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;
+            else knownRooms.delete(roomId);
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            remaining -= 1;
+            if (remaining === 0) finish();
+          });
+      }
+    });
   };
 
   const refreshExpiredRoom = async (roomId: string, room: RoomState): Promise<RoomRefreshResult> => {
