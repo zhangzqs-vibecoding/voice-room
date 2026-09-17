@@ -25,6 +25,7 @@ export class RoomExpiredError extends Error {
 
 export interface ApiConfig {
   livekitUrl: string;
+  livekitPublicUrl: string;
   apiKey: string;
   apiSecret: string;
   tokenTtlSeconds: number;
@@ -265,7 +266,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
           expiresAtMs: room.expiresAt
         });
         room.reservedParticipants -= 1;
-        return { participantId, livekitUrl: options.config.livekitUrl, token };
+        return { participantId, livekitUrl: options.config.livekitPublicUrl, token };
       } catch (error) {
         if (!isRoomExpiredError(error)) {
           room.reservedParticipants -= 1;

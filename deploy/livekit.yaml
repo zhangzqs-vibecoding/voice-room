@@ -1,0 +1,16 @@
+# 本地开发配置。访问凭据由 docker compose 的 --keys 参数注入，不能写入此文件。
+port: 7880
+log_level: info
+redis:
+  address: redis:6379
+rtc:
+  # 低延迟媒体优先走 UDP；受限网络可回退到 ICE/TCP。
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+turn:
+  # 本地没有受信任证书，不能提供 TURN/TLS；生产模板和部署文档另行说明。
+  enabled: false
+  udp_port: 3478
+  tls_port: 5349
+# 每个房间的 maxParticipants 由 API 的 CreateRoomRequest（10）设置，不能由客户端覆盖。

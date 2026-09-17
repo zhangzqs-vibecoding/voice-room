@@ -26,14 +26,14 @@ const wholeSecondTimeout = (environment: NodeJS.ProcessEnv): number => {
   return value;
 };
 
-const parseLiveKitUrl = (value: string): string => {
+const parseLiveKitUrl = (value: string, name: 'LIVEKIT_URL' | 'LIVEKIT_PUBLIC_URL'): string => {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error('LIVEKIT_URL must be a ws or wss URL');
+    throw new Error(`${name} must be a ws or wss URL`);
   }
-  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') throw new Error('LIVEKIT_URL must be a ws or wss URL');
+  if (url.protocol !== 'ws:' && url.protocol !== 'wss:') throw new Error(`${name} must be a ws or wss URL`);
   return url.toString();
 };
 
@@ -43,7 +43,8 @@ export const loadServerConfig = (environment: NodeJS.ProcessEnv): ServerConfig =
   return {
     port,
     apiConfig: {
-      livekitUrl: parseLiveKitUrl(required(environment, 'LIVEKIT_URL')),
+      livekitUrl: parseLiveKitUrl(required(environment, 'LIVEKIT_URL'), 'LIVEKIT_URL'),
+      livekitPublicUrl: parseLiveKitUrl(required(environment, 'LIVEKIT_PUBLIC_URL'), 'LIVEKIT_PUBLIC_URL'),
       apiKey: required(environment, 'LIVEKIT_API_KEY'),
       apiSecret: required(environment, 'LIVEKIT_API_SECRET'),
       tokenTtlSeconds: positiveInteger(environment, 'LIVEKIT_TOKEN_TTL_SECONDS', '900'),
