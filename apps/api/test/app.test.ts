@@ -12,7 +12,9 @@ const config = {
 
 class FakeLiveKitGateway implements LiveKitGateway {
   createdRooms: Array<Record<string, unknown>> = [];
+  createdTokens: Array<Record<string, unknown>> = [];
   shouldFailCreate = false;
+  shouldFailToken = false;
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -20,6 +22,8 @@ class FakeLiveKitGateway implements LiveKitGateway {
   }
 
   async createAccessToken(input: Record<string, unknown>) {
+    if (this.shouldFailToken) throw new Error('LiveKit token signing unavailable');
+    this.createdTokens.push(input);
     return JSON.stringify(input);
   }
 }
@@ -104,7 +108,8 @@ describe('voice room API', () => {
     expect(token.roomName).toBe('room_abcdefghijklmnopqrstuv');
     expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true });
     expect(token.metadata).toBe(JSON.stringify({ nickname: '小王', avatarId: 'fox' }));
-    expect(token.ttlSeconds).toBe(900);
+    expect(token.ttlSeconds).toBeGreaterThan(0);
+    expect(token.ttlSeconds).toBeLessThanOrEqual(300);
     expect(token.apiSecret).toBeUndefined();
     await app.close();
   });
@@ -146,6 +151,84 @@ describe('voice room API', () => {
     });
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'room_not_found' });
+    await app.close();
+  });
+
+  it('limits token lifetime to the remaining room lifetime', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    currentTime = 299_000;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(livekit.createdTokens).toHaveLength(1);
+    expect(livekit.createdTokens[0]?.ttlSeconds).toBe(1);
+    expect(currentTime + Number(livekit.createdTokens[0]?.ttlSeconds) * 1000).toBeLessThanOrEqual(300_000);
+    await app.close();
+  });
+
+  it('does not issue a token with less than one second of room lifetime remaining', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    currentTime = 299_001;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(404);
+    expect(livekit.createdTokens).toHaveLength(0);
+    await app.close();
+  });
+
+  it('releases a failed token-signing reservation for a subsequent valid join', async () => {
+    const { app, livekit } = buildApp();
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    for (let index = 0; index < 9; index += 1) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+        payload: { nickname: `member-${index}`, avatarId: 'fox' }
+      });
+      expect(response.statusCode).toBe(200);
+    }
+    livekit.shouldFailToken = true;
+    const failed = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'will-fail', avatarId: 'fox' }
+    });
+    expect(failed.statusCode).toBe(502);
+    livekit.shouldFailToken = false;
+    const recovered = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'recovered', avatarId: 'fox' }
+    });
+    expect(recovered.statusCode).toBe(200);
+    const full = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'extra', avatarId: 'fox' }
+    });
+    expect(full.statusCode).toBe(409);
     await app.close();
   });
 

@@ -93,7 +93,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.post('/api/rooms/:roomId/join', async (request, reply) => {
     const { roomId } = request.params as { roomId: string };
     const room = knownRooms.get(roomId);
-    if (!room || now() >= room.expiresAt) {
+    const remainingTtlSeconds = room ? Math.floor((room.expiresAt - now()) / 1000) : 0;
+    if (!room || remainingTtlSeconds < 1) {
       knownRooms.delete(roomId);
       return reply.code(404).send({ error: 'room_not_found' });
     }
@@ -112,7 +113,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         roomName: roomId,
         metadata,
         grants: { roomJoin: true, canPublish: true, canSubscribe: true },
-        ttlSeconds: options.config.tokenTtlSeconds
+        ttlSeconds: Math.min(options.config.tokenTtlSeconds, remainingTtlSeconds)
       });
       room.reservedParticipants -= 1;
       room.issuedParticipants += 1;
