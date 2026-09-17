@@ -184,7 +184,10 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.addHook('onRequest', async (request, reply) => {
     if (!MUTATING_METHODS.has(request.method)) return;
     const contentType = request.headers['content-type'];
-    if (contentType && !contentType.startsWith('application/json')) return reply.code(415).send({ error: 'invalid_request' });
+    const mediaType = contentType?.split(';', 1)[0]?.trim().toLowerCase();
+    if (mediaType && mediaType !== 'application/json' && !/^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(mediaType)) {
+      return reply.code(415).send({ error: 'invalid_request' });
+    }
     const key = clientAddress(request);
     const requestTime = now();
     sweepRateLimits(requestTime);

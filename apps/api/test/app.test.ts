@@ -255,6 +255,14 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('rejects content types that merely start with application/json', async () => {
+    const { app } = buildApp();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms', headers: { 'content-type': 'application/jsonp; charset=utf-8' }, payload: 'not json' });
+    expect(response.statusCode).toBe(415);
+    expect(response.json()).toEqual({ error: 'invalid_request' });
+    await app.close();
+  });
+
   it('times out a hanging LiveKit room creation', async () => {
     const { app, livekit } = buildApp({ config: { ...config, livekitRequestTimeoutMs: 15 } });
     livekit.neverResolvingCreate = true;
