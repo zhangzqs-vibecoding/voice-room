@@ -34,6 +34,15 @@ describe('入场控制台', () => {
     expect(page.textContent).toContain('请手动复制邀请链接。');
   });
 
+  it('Clipboard 写入被拒绝时提示手动复制', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ roomId: 'room_invite' }), { status: 201 })));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } });
+    const page = await render();
+    await act(async () => { [...page.querySelectorAll('button')].find((button) => button.textContent === '创建邀请房间')?.click(); });
+    await act(async () => { [...page.querySelectorAll('button')].find((button) => button.textContent === '复制邀请链接')?.click(); });
+    expect(page.textContent).toContain('请手动复制邀请链接。');
+  });
+
   it('仅收听加入后在房间保留仅收听状态', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }))));
     localStorage.setItem('voice-room.preferences', JSON.stringify({ nickname: '阿北', avatarId: 'owl', deviceId: 'usb', mode: 'voice' }));
