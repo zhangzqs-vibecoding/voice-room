@@ -1,0 +1,11 @@
+{
+  "name": "voice-room",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "test": "pnpm --filter @voice-room/api test",
+    "typecheck": "pnpm --filter @voice-room/api typecheck",
+    "lint": "pnpm --filter @voice-room/api lint",
+    "build": "pnpm --filter @voice-room/api build"
+  }
+}
