@@ -1,7 +1,8 @@
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App, Room } from '../src/App.js';
+import type { SessionAdapter } from '../src/audio-session.js';
 
 let host: HTMLDivElement | undefined;
 afterEach(() => { host?.remove(); host = undefined; localStorage.clear(); history.replaceState(null, '', '/'); });
@@ -49,7 +50,7 @@ describe('入场控制台', () => {
     history.replaceState(null, '', '?room=room_a');
     const page = await render();
     await act(async () => { [...page.querySelectorAll('button')].find((button) => button.textContent === '仅收听进入')?.click(); });
-    expect(page.textContent).toContain('仅收听 · 等待音频连接');
+    expect(page.textContent).toContain('仅收听');
     expect(page.textContent).not.toContain('正在发言');
   });
 });
@@ -58,8 +59,48 @@ describe('房间成员模型', () => {
   it('仅收听的当前成员显示等待连接且不显示发言中', async () => {
     host = document.createElement('div'); document.body.append(host);
     await act(async () => { createRoot(host!).render(<Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly members={[{ id: 'other', name: '小林', avatarId: 'cat', speaking: true }]} onLeave={vi.fn()} />); });
-    expect(host.textContent).toContain('仅收听 · 等待音频连接');
+    expect(host.textContent).toContain('仅收听');
     expect(host.querySelectorAll('[data-speaking="true"]')).toHaveLength(1);
     expect(host.textContent).not.toContain('阿北（我）正在发言');
+  });
+
+  it('房内切换麦克风时调用会话并保留可访问控件', async () => {
+    const session: SessionAdapter = { connect: vi.fn(), publish: vi.fn(), setMuted: vi.fn(), switchDevice: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(() => () => undefined) };
+    const changed = vi.fn();
+    host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly={false} members={[]} deviceId="usb" devices={[{ deviceId: 'usb', label: 'USB' }, { deviceId: 'line', label: 'Line' }]} credentials={{ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }} sessionFactory={() => session} onDeviceChange={changed} onLeave={vi.fn()} />); });
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')!;
+    await act(async () => { select.value = 'line'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(changed).toHaveBeenCalledWith('line');
+    expect(session.switchDevice).toHaveBeenCalledOnce();
+  });
+
+  it('房内切换设备不重建 LiveKit 会话', async () => {
+    const session: SessionAdapter = { connect: vi.fn(), publish: vi.fn(), setMuted: vi.fn(), switchDevice: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(() => () => undefined) };
+    const Harness = () => { const [deviceId, setDeviceId] = useState('usb'); return <Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly={false} members={[]} deviceId={deviceId} devices={[{ deviceId: 'usb', label: 'USB' }, { deviceId: 'line', label: 'Line' }]} credentials={{ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }} sessionFactory={() => session} onDeviceChange={setDeviceId} onLeave={vi.fn()} />; };
+    host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<Harness />); });
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')!;
+    await act(async () => { select.value = 'line'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(session.switchDevice).toHaveBeenCalledOnce();
+    expect(session.connect).toHaveBeenCalledOnce();
+    expect(session.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('房内控制失败时保留原设备和静音状态并显示错误', async () => {
+    const session: SessionAdapter = { connect: vi.fn(), publish: vi.fn(), setMuted: vi.fn().mockRejectedValue(new Error('failed')), switchDevice: vi.fn().mockRejectedValue(new Error('failed')), disconnect: vi.fn(), onEvent: vi.fn(() => () => undefined) };
+    const changed = vi.fn(); host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly={false} members={[]} deviceId="usb" devices={[{ deviceId: 'usb', label: 'USB' }, { deviceId: 'line', label: 'Line' }]} credentials={{ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }} sessionFactory={() => session} onDeviceChange={changed} onLeave={vi.fn()} />); });
+    await act(async () => { host!.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')!.value = 'line'; host!.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')!.dispatchEvent(new Event('change', { bubbles: true })); });
+    await act(async () => { [...host!.querySelectorAll('button')].find((button) => button.textContent === '静音')?.click(); });
+    expect(changed).not.toHaveBeenCalled(); expect(host.querySelector<HTMLSelectElement>('[aria-label="房内麦克风设备"]')?.value).toBe('usb'); expect(host.textContent).toContain('静音切换失败');
+  });
+
+  it('离开清理失败仍回到大厅', async () => {
+    const session: SessionAdapter = { connect: vi.fn(), publish: vi.fn(), setMuted: vi.fn(), switchDevice: vi.fn(), disconnect: vi.fn().mockRejectedValue(new Error('failed')), onEvent: vi.fn(() => () => undefined) };
+    const left = vi.fn(); host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly={false} members={[]} credentials={{ participantId: 'p1', livekitUrl: 'wss://rtc', token: 't' }} sessionFactory={() => session} onLeave={left} />); });
+    await act(async () => { [...host!.querySelectorAll('button')].find((button) => button.textContent === '离开房间')?.click(); });
+    expect(left).toHaveBeenCalledOnce(); expect(host.textContent).toContain('释放音频失败');
   });
 });
