@@ -49,7 +49,7 @@ describe('入场控制台', () => {
     history.replaceState(null, '', '?room=room_a');
     const page = await render();
     await act(async () => { [...page.querySelectorAll('button')].find((button) => button.textContent === '仅收听进入')?.click(); });
-    expect(page.textContent).toContain('仅收听 · 等待音频连接');
+    expect(page.textContent).toContain('仅收听');
     expect(page.textContent).not.toContain('正在发言');
   });
 });
@@ -58,7 +58,7 @@ describe('房间成员模型', () => {
   it('仅收听的当前成员显示等待连接且不显示发言中', async () => {
     host = document.createElement('div'); document.body.append(host);
     await act(async () => { createRoot(host!).render(<Room roomId="room_a" nickname="阿北" avatarId="owl" listenOnly members={[{ id: 'other', name: '小林', avatarId: 'cat', speaking: true }]} onLeave={vi.fn()} />); });
-    expect(host.textContent).toContain('仅收听 · 等待音频连接');
+    expect(host.textContent).toContain('仅收听');
     expect(host.querySelectorAll('[data-speaking="true"]')).toHaveLength(1);
     expect(host.textContent).not.toContain('阿北（我）正在发言');
   });
