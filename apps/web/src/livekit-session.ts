@@ -1,12 +1,17 @@
-import { Room, RoomEvent, Track, createLocalAudioTrack, type LocalAudioTrack, type RemoteTrack } from 'livekit-client';
+import { AudioPresets, Room, RoomEvent, Track, createLocalAudioTrack, type LocalAudioTrack, type RemoteTrack, type TrackPublishOptions } from 'livekit-client';
 import type { AudioConstraints, RemoteMember, SessionAdapter, SessionEvent } from './audio-session.js';
 
 /** Browser-only LiveKit bridge. The SFU receives audio directly; this class never records or stores it. */
+export const publishOptions = (constraints: AudioConstraints): TrackPublishOptions => {
+  const instrument = constraints.channelCount === 2;
+  return { source: Track.Source.Microphone, forceStereo: instrument, dtx: !instrument, red: true, audioPreset: instrument ? AudioPresets.musicHighQualityStereo : AudioPresets.speech };
+};
 export class LiveKitSessionAdapter implements SessionAdapter {
   private readonly room = new Room({ adaptiveStream: false, dynacast: true });
   private localTrack?: LocalAudioTrack;
   private listener?: (event: SessionEvent) => void;
   private attached = new Set<HTMLAudioElement>();
+  private readonly trackElements = new Map<RemoteTrack, HTMLAudioElement>();
   private analyser?: AnalyserNode;
   private analyserTimer?: number;
   private context?: AudioContext;
@@ -17,14 +22,14 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     this.room.on(RoomEvent.Disconnected, (reason) => this.emit({ type: 'disconnected', reason: String(reason ?? 'disconnected') }));
     this.room.on(RoomEvent.ActiveSpeakersChanged, (participants) => this.emit({ type: 'active-speakers', participantIds: participants.map((participant) => participant.identity) }));
     this.room.on(RoomEvent.TrackSubscribed, (track) => this.attachRemoteAudio(track));
+    this.room.on(RoomEvent.TrackUnsubscribed, (track) => this.detachRemoteAudio(track));
     this.room.on(RoomEvent.ParticipantConnected, () => this.emitMembers());
     this.room.on(RoomEvent.ParticipantDisconnected, () => this.emitMembers());
   }
   async connect(url: string, token: string): Promise<void> { await this.room.connect(url, token); this.emitMembers(); this.emit({ type: 'connected' }); }
   async publish(constraints: AudioConstraints): Promise<void> {
     this.localTrack = await createLocalAudioTrack({ ...constraints });
-    const instrument = constraints.channelCount === 2;
-    await this.room.localParticipant.publishTrack(this.localTrack, { source: Track.Source.Microphone, forceStereo: instrument, dtx: !instrument, red: true });
+    await this.room.localParticipant.publishTrack(this.localTrack, publishOptions(constraints));
     this.startLevelMeter(this.localTrack);
   }
   async setMuted(muted: boolean): Promise<void> {
@@ -37,8 +42,7 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     await this.room.localParticipant.unpublishTrack(this.localTrack, true);
     this.stopLevelMeter(); this.localTrack.stop();
     this.localTrack = await createLocalAudioTrack({ ...constraints });
-    const instrument = constraints.channelCount === 2;
-    await this.room.localParticipant.publishTrack(this.localTrack, { source: Track.Source.Microphone, forceStereo: instrument, dtx: !instrument, red: true });
+    await this.room.localParticipant.publishTrack(this.localTrack, publishOptions(constraints));
     this.startLevelMeter(this.localTrack);
   }
   onEvent(listener: (event: SessionEvent) => void): () => void { this.listener = listener; return () => { if (this.listener === listener) this.listener = undefined; }; }
@@ -51,7 +55,12 @@ export class LiveKitSessionAdapter implements SessionAdapter {
   private attachRemoteAudio(track: RemoteTrack): void {
     if (track.kind !== Track.Kind.Audio) return;
     const element = track.attach(); element.autoplay = true; element.setAttribute('playsinline', ''); element.dataset.livekitAudio = 'true';
-    document.body.append(element); this.attached.add(element);
+    document.body.append(element); this.attached.add(element); this.trackElements.set(track, element);
+  }
+  private detachRemoteAudio(track: RemoteTrack): void {
+    const element = this.trackElements.get(track);
+    if (!element) return;
+    track.detach(element); element.pause(); element.remove(); this.attached.delete(element); this.trackElements.delete(track);
   }
   private startLevelMeter(track: LocalAudioTrack): void {
     try {

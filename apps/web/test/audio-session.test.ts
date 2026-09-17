@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AudioSession, instrumentConstraints, voiceConstraints, type SessionAdapter, type SessionEvent } from '../src/audio-session.js';
+import { publishOptions } from '../src/livekit-session.js';
 
 const adapter = (): SessionAdapter & { emit: (event: SessionEvent) => void } => {
   let listener: ((event: SessionEvent) => void) | undefined;
@@ -17,6 +18,10 @@ describe('音频采集参数', () => {
 
   it('乐器模式请求无处理的 48kHz 立体声', () => {
     expect(instrumentConstraints('line')).toMatchObject({ deviceId: { exact: 'line' }, channelCount: 2, sampleRate: 48_000, echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+  });
+
+  it('乐器发布锁定高质量立体声预设并关闭 DTX', () => {
+    expect(publishOptions(instrumentConstraints('line'))).toMatchObject({ forceStereo: true, dtx: false, red: true, audioPreset: { maxBitrate: expect.any(Number) } });
   });
 });
 
@@ -61,5 +66,13 @@ describe('AudioSession', () => {
     fake.emit({ type: 'reconnecting' });
     expect(fake.disconnect).toHaveBeenCalledOnce();
     expect(onState).toHaveBeenLastCalledWith(expect.objectContaining({ connection: 'disconnected', disconnectReason: 'left' }));
+  });
+
+  it('并发离开只断开一次', async () => {
+    const fake = adapter();
+    const session = new AudioSession(fake);
+    await session.enter({ livekitUrl: 'wss://rtc', token: 'token', listenOnly: true, mode: 'voice', deviceId: '' });
+    await Promise.all([session.leave(), session.leave()]);
+    expect(fake.disconnect).toHaveBeenCalledOnce();
   });
 });

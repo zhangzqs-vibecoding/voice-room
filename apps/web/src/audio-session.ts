@@ -36,6 +36,7 @@ export class AudioSession {
   private muted = false;
   private listening = true;
   private stopEvents?: () => void;
+  private leaving?: Promise<void>;
   public constructor(private readonly adapter: SessionAdapter, private readonly onState: (state: SessionState) => void = () => {}) {}
 
   async enter(options: EnterOptions): Promise<void> {
@@ -60,6 +61,11 @@ export class AudioSession {
     await this.adapter.setMuted(this.muted);
   }
   async leave(): Promise<void> {
+    if (this.leaving) return this.leaving;
+    this.leaving = this.leaveOnce();
+    return this.leaving;
+  }
+  private async leaveOnce(): Promise<void> {
     this.stopEvents?.(); this.stopEvents = undefined;
     await this.adapter.disconnect();
     this.update({ connection: 'disconnected', activeSpeakerIds: [], disconnectReason: 'left' });
