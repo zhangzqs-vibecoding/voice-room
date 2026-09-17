@@ -80,6 +80,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   const app = Fastify({ logger: false, trustProxy: compileTrustedProxy(options.config.trustedProxyCidrs) });
   const knownRooms = new Map<string, RoomState>();
   const rateLimits = new Map<string, RateLimitEntry>();
+  let pendingCreates = 0;
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
   const now = options.now ?? Date.now;
@@ -162,18 +163,21 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.post('/api/rooms', async (_request, reply) => {
-    if (knownRooms.size >= options.config.roomCacheMaxEntries) {
-      await sweepKnownRooms();
-      if (knownRooms.size >= options.config.roomCacheMaxEntries) return reply.code(503).send({ error: 'room_cache_full' });
-    }
     const roomId = createRoomId();
     if (!ROOM_ID_PATTERN.test(roomId)) return reply.code(502).send({ error: 'room_service_unavailable' });
+    if (knownRooms.size + pendingCreates >= options.config.roomCacheMaxEntries) {
+      await sweepKnownRooms();
+      if (knownRooms.size + pendingCreates >= options.config.roomCacheMaxEntries) return reply.code(503).send({ error: 'room_cache_full' });
+    }
+    pendingCreates += 1;
     try {
       await options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 });
       knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0 });
       return reply.code(201).send({ roomId });
     } catch {
       return reply.code(502).send({ error: 'room_service_unavailable' });
+    } finally {
+      pendingCreates -= 1;
     }
   });
 

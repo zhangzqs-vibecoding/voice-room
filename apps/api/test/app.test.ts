@@ -25,12 +25,17 @@ class FakeLiveKitGateway implements LiveKitGateway {
   readonly roomExistsCalls: string[] = [];
   readonly slowRoomIds = new Set<string>();
   roomExistsDelayMs = 0;
+  deferRoomCreation = false;
   deferTokenSigning = false;
+  private readonly pendingRoomCreationResolutions: Array<() => void> = [];
   private readonly pendingTokenResolutions: Array<() => void> = [];
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
     this.createdRooms.push(options);
+    if (this.deferRoomCreation) {
+      await new Promise<void>((resolve) => this.pendingRoomCreationResolutions.push(resolve));
+    }
   }
 
   async createAccessToken(input: Record<string, unknown>) {
@@ -48,6 +53,10 @@ class FakeLiveKitGateway implements LiveKitGateway {
 
   finishPendingTokenSignatures() {
     for (const resolve of this.pendingTokenResolutions.splice(0)) resolve();
+  }
+
+  finishPendingRoomCreations() {
+    for (const resolve of this.pendingRoomCreationResolutions.splice(0)) resolve();
   }
 
   async roomExists(roomName: string) {
@@ -125,6 +134,29 @@ describe('voice room API', () => {
     expect(response.statusCode).toBe(201);
     expect(response.json()).toEqual({ roomId: 'room_abcdefghijklmnopqrstuv' });
     expect(livekit.createdRooms).toEqual([{ name: 'room_abcdefghijklmnopqrstuv', maxParticipants: 10, emptyTimeout: 300, departureTimeout: 300 }]);
+    await app.close();
+  });
+
+  it('reserves a cache slot before concurrent room creation reaches the SFU', async () => {
+    const livekit = new FakeLiveKitGateway();
+    livekit.deferRoomCreation = true;
+    const roomIds = ['room_aaaaaaaaaaaaaaaaaaaa', 'room_bbbbbbbbbbbbbbbbbbbb'];
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_cccccccccccccccccccc'
+    });
+    const first = app.inject({ method: 'POST', url: '/api/rooms' });
+    for (let attempt = 0; attempt < 10 && livekit.createdRooms.length === 0; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    const second = app.inject({ method: 'POST', url: '/api/rooms' });
+    for (let attempt = 0; attempt < 10 && livekit.createdRooms.length < 2; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(livekit.createdRooms).toHaveLength(1);
+    livekit.finishPendingRoomCreations();
+    expect((await first).statusCode).toBe(201);
+    const secondResponse = await second;
+    expect(secondResponse.statusCode).toBe(503);
+    expect(secondResponse.json()).toEqual({ error: 'room_cache_full' });
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(503);
     await app.close();
   });
 
