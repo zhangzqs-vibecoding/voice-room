@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
 import { RoomExpiredError, type ApiConfig, type LiveKitGateway } from './app.js';
 
 export class LiveKitServerGateway implements LiveKitGateway {
@@ -19,7 +19,7 @@ export class LiveKitServerGateway implements LiveKitGateway {
     participantId: string;
     roomName: string;
     metadata: string;
-    grants: { roomJoin: true; canPublish: true; canSubscribe: true };
+    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string> {
@@ -31,7 +31,11 @@ export class LiveKitServerGateway implements LiveKitGateway {
       metadata: input.metadata,
       ttl: `${ttlSeconds}s`
     });
-    token.addGrant({ room: input.roomName, ...input.grants });
+    token.addGrant({ ...input.grants, room: input.roomName, canPublishData: false, canPublishSources: [TrackSource.MICROPHONE] });
     return token.toJwt();
+  }
+
+  async getParticipantCount(roomName: string): Promise<number> {
+    return (await this.roomService.listParticipants(roomName)).length;
   }
 }

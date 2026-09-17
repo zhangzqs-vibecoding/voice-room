@@ -7,7 +7,7 @@ const config = {
   apiKey: 'key',
   apiSecret: 'secret',
   tokenTtlSeconds: 900,
-  rateLimit: { max: 3, timeWindowMs: 60_000 }
+  rateLimit: { max: 3, timeWindowMs: 60_000, maxKeys: 1_000 }
 };
 
 class FakeLiveKitGateway implements LiveKitGateway {
@@ -16,6 +16,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   shouldFailCreate = false;
   shouldFailToken = false;
   shouldExpireToken = false;
+  activeParticipantCount = 0;
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -28,13 +29,17 @@ class FakeLiveKitGateway implements LiveKitGateway {
     this.createdTokens.push(input);
     return JSON.stringify(input);
   }
+
+  async getParticipantCount() {
+    return this.activeParticipantCount;
+  }
 }
 
 const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
   const livekit = new FakeLiveKitGateway();
   return {
     app: createApp({
-      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 }, ...overrides.config },
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 }, ...overrides.config },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
       ...overrides
@@ -54,7 +59,7 @@ describe('voice room API', () => {
         participantId: 'participant_123',
         roomName: 'room_abcdefghijklmnopqrstuv',
         metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
-        grants: { roomJoin: true, canPublish: true, canSubscribe: true },
+        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
         maximumTtlSeconds: 900,
         expiresAtMs
       } as Parameters<typeof livekit.createAccessToken>[0]);
@@ -71,7 +76,7 @@ describe('voice room API', () => {
       participantId: 'participant_123',
       roomName: 'room_abcdefghijklmnopqrstuv',
       metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
-      grants: { roomJoin: true, canPublish: true, canSubscribe: true },
+      grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
       maximumTtlSeconds: 900,
       expiresAtMs: Date.now() + 900_000
     });
@@ -79,6 +84,7 @@ describe('voice room API', () => {
     expect(payload.sub).toBe('participant_123');
     expect(payload.metadata).toBe(JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }));
     expect(payload.video).toMatchObject({ room: 'room_abcdefghijklmnopqrstuv', roomJoin: true, canPublish: true, canSubscribe: true });
+    expect(payload.video).toMatchObject({ canPublishData: false, canPublishSources: ['microphone'] });
   });
 
   it('returns a health response', async () => {
@@ -130,7 +136,7 @@ describe('voice room API', () => {
     expect(body.livekitUrl).toBe('ws://livekit.test');
     const token = JSON.parse(body.token);
     expect(token.roomName).toBe('room_abcdefghijklmnopqrstuv');
-    expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true });
+    expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] });
     expect(token.metadata).toBe(JSON.stringify({ nickname: '小王', avatarId: 'fox' }));
     expect(token.maximumTtlSeconds).toBe(900);
     expect(token.expiresAtMs).toBeGreaterThan(Date.now());
@@ -161,7 +167,7 @@ describe('voice room API', () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
-      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
       now: () => currentTime
@@ -178,11 +184,33 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('renews a room at the join audit point when the SFU still has active members', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    livekit.activeParticipantCount = 1;
+    currentTime = 300_000;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(livekit.createdTokens[0]?.expiresAtMs).toBe(600_000);
+    await app.close();
+  });
+
   it('limits token lifetime to the remaining room lifetime', async () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
-      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
       now: () => currentTime
@@ -205,7 +233,7 @@ describe('voice room API', () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
-      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000 } },
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
       now: () => currentTime
@@ -307,6 +335,26 @@ describe('voice room API', () => {
     const responses = await Promise.all(Array.from({ length: 4 }, () => app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.8' })));
     expect(responses.filter((response) => response.statusCode === 201)).toHaveLength(3);
     expect(responses.at(-1)?.statusCode).toBe(429);
+    await app.close();
+  });
+
+  it('bounds rate-limit state and admits a new IP after expired entries are cleaned up', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 10, timeWindowMs: 100, maxKeys: 2 } },
+      livekit,
+      now: () => currentTime
+    });
+    const first = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.1' });
+    const second = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.2' });
+    const capped = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.3' });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    expect(capped.statusCode).toBe(429);
+    currentTime = 101;
+    const afterCleanup = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.3' });
+    expect(afterCleanup.statusCode).toBe(201);
     await app.close();
   });
 });

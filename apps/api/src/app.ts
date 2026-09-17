@@ -10,10 +10,11 @@ export interface LiveKitGateway {
     participantId: string;
     roomName: string;
     metadata: string;
-    grants: { roomJoin: true; canPublish: true; canSubscribe: true };
+    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string>;
+  getParticipantCount(roomName: string): Promise<number>;
 }
 
 export class RoomExpiredError extends Error {
@@ -25,7 +26,7 @@ export interface ApiConfig {
   apiKey: string;
   apiSecret: string;
   tokenTtlSeconds: number;
-  rateLimit: { max: number; timeWindowMs: number };
+  rateLimit: { max: number; timeWindowMs: number; maxKeys: number };
 }
 
 export interface CreateAppOptions {
@@ -73,7 +74,15 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (!MUTATING_METHODS.has(request.method)) return;
     const key = clientAddress(request);
     const after = now() - options.config.rateLimit.timeWindowMs;
-    const recent = (requestTimes.get(key) ?? []).filter((time) => time > after);
+    for (const [address, times] of requestTimes) {
+      const recentTimes = times.filter((time) => time > after);
+      if (recentTimes.length === 0) requestTimes.delete(address);
+      else requestTimes.set(address, recentTimes);
+    }
+    const recent = requestTimes.get(key) ?? [];
+    if (recent.length === 0 && requestTimes.size >= options.config.rateLimit.maxKeys) {
+      return reply.code(429).send({ error: 'rate_limited' });
+    }
     if (recent.length >= options.config.rateLimit.max) {
       return reply.code(429).send({ error: 'rate_limited' });
     }
@@ -98,8 +107,21 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.post('/api/rooms/:roomId/join', async (request, reply) => {
     const { roomId } = request.params as { roomId: string };
     const room = knownRooms.get(roomId);
-    const remainingTtlSeconds = room ? Math.floor((room.expiresAt - now()) / 1000) : 0;
-    if (!room || remainingTtlSeconds < 1) {
+    if (!room) return reply.code(404).send({ error: 'room_not_found' });
+    const requestTime = now();
+    if (requestTime >= room.expiresAt) {
+      try {
+        if (await options.livekit.getParticipantCount(roomId) === 0) {
+          knownRooms.delete(roomId);
+          return reply.code(404).send({ error: 'room_not_found' });
+        }
+        room.expiresAt = requestTime + ROOM_LINK_LIFETIME_MS;
+      } catch {
+        return reply.code(502).send({ error: 'room_service_unavailable' });
+      }
+    }
+    const remainingTtlSeconds = Math.floor((room.expiresAt - now()) / 1000);
+    if (remainingTtlSeconds < 1) {
       knownRooms.delete(roomId);
       return reply.code(404).send({ error: 'room_not_found' });
     }
@@ -117,7 +139,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         participantId,
         roomName: roomId,
         metadata,
-        grants: { roomJoin: true, canPublish: true, canSubscribe: true },
+        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
         maximumTtlSeconds: options.config.tokenTtlSeconds,
         expiresAtMs: room.expiresAt
       });
