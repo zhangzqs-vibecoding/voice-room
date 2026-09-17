@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --save '' --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  livekit:
+    image: livekit/livekit-server:v1.9.11
+    command:
+      - --config
+      - /etc/livekit.yaml
+      - --keys
+      - "${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}: ${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: "${LIVEKIT_API_KEY:?LIVEKIT_API_KEY is required}"
+      LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:?LIVEKIT_API_SECRET is required}"
+      PORT: 3000
+    depends_on:
+      livekit:
+        condition: service_started
+    ports:
+      - "3000:3000"
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    depends_on:
+      - api
+    ports:
+      - "5173:8080"
