@@ -4,6 +4,7 @@ import { LiveKitServerGateway } from '../src/livekit-gateway.js';
 
 const config = {
   livekitUrl: 'ws://livekit.test',
+  livekitPublicUrl: 'wss://public-livekit.test',
   apiKey: 'key',
   apiSecret: 'secret',
   tokenTtlSeconds: 900,
@@ -211,7 +212,7 @@ describe('voice room API', () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.participantId).toMatch(/^participant_[a-z0-9]{20,}$/);
-    expect(body.livekitUrl).toBe('ws://livekit.test');
+    expect(body.livekitUrl).toBe('wss://public-livekit.test');
     const token = JSON.parse(body.token);
     expect(token.roomName).toBe('room_abcdefghijklmnopqrstuv');
     expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] });

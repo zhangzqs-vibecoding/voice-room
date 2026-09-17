@@ -11,6 +11,11 @@ test('本地 Compose 以环境变量启动 Redis、LiveKit 和 API，且不发�
   assert.match(compose, /^\s*api:/m);
   assert.match(compose, /\$\{LIVEKIT_API_KEY:\?/);
   assert.match(compose, /\$\{LIVEKIT_API_SECRET:\?/);
+  assert.match(compose, /LIVEKIT_URL: ws:\/\/livekit:7880/);
+  assert.match(compose, /LIVEKIT_PUBLIC_URL: ws:\/\/localhost:7880/);
+  assert.match(compose, /condition: service_healthy/);
+  assert.match(compose, /wget -qO- http:\/\/localhost:7880\//);
+  assert.match(compose, /fetch\('http:\/\/127\.0\.0\.1:3000\/health'\)/);
   assert.doesNotMatch(compose, /^\s*-\s*["']?6379:6379/m);
 });
 
@@ -27,7 +32,7 @@ test('LiveKit 配置包含开发 Redis、ICE 回退和 TURN 端口，密钥由 C
 test('CI 验证安装、测试、类型检查、lint、构建和部署配置', async () => {
   const workflow = await text('.github/workflows/ci.yml');
   assert.ok(workflow.indexOf('pnpm/action-setup@v4') < workflow.indexOf('actions/setup-node@v4'), 'pnpm 必须先于 setup-node 配置，供依赖缓存发现可执行文件');
-  for (const command of ['pnpm install --frozen-lockfile', 'pnpm test', 'pnpm typecheck', 'pnpm lint', 'pnpm build', 'docker compose --env-file .env.example -f deploy/docker-compose.yml config']) {
+  for (const command of ['pnpm install --frozen-lockfile', 'pnpm test', 'pnpm typecheck', 'pnpm lint', 'pnpm build', 'docker compose --env-file .env.example -f deploy/docker-compose.yml config', 'docker compose --env-file .env.example -f deploy/docker-compose.yml build']) {
     assert.match(workflow, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });

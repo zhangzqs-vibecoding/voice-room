@@ -17,15 +17,16 @@ docker compose --env-file .env -f deploy/docker-compose.yml up --build
 
 然后访问 `http://localhost:5173`；浏览器到 API 的 `/api` 请求由本地 Caddy 容器转发，
 API 以容器内的 `ws://livekit:7880` 访问 SFU。调试客户端使用
-`ws://localhost:7880`。Redis 没有主机端口映射。停止时使用：
+`ws://localhost:7880`，它由 Compose 的 `LIVEKIT_PUBLIC_URL` 返回；绝不能把仅容器内部
+可达的 `LIVEKIT_URL=ws://livekit:7880` 返回给浏览器。Redis 没有主机端口映射。停止时使用：
 
 ```sh
 docker compose --env-file .env -f deploy/docker-compose.yml down
 ```
 
 本地配置暴露 7880（仅开发信令）、7881/TCP 与 50000–50100/UDP；TURN 被禁用，因为
-本机无可信 TLS 证书。当前 Web 只提供入场与房间界面；合并音频会话实现前，不应把本地
-页面视作双浏览器通话验收。
+本机无可信 TLS 证书。容器健康检查会依次确认 LiveKit HTTP 端点、API `/health` 与 Web
+静态入口；这只证明服务可用，不取代实际媒体链路验收。
 
 ## 生产网络与 TLS
 
@@ -33,6 +34,10 @@ docker compose --env-file .env -f deploy/docker-compose.yml down
 `turn.example.com` 准备 DNS A/AAAA 记录，均指向 LiveKit 节点公网 IP。浏览器连接必须
 使用 `https://`/`wss://app.example.com`；LiveKit API/信令 7880 放在 HTTPS 反向代理后，
 业务 API 3000 和 Redis 不对公网开放。
+
+生产 API 设置 `LIVEKIT_URL=ws://livekit:7880`（或私网 SFU 地址）供 RoomService 调用，
+并单独设置 `LIVEKIT_PUBLIC_URL=wss://app.example.com` 供 join 响应返回给浏览器。两个值
+都必须是 `ws://` 或 `wss://` URL；前者不得暴露给客户端。
 
 按 LiveKit 官方 VM 生成器生成匹配域名的 `caddy.yaml`、`docker-compose.yaml` 和
 `livekit.yaml`，然后在专用 Linux VM 上部署：
@@ -76,9 +81,11 @@ pnpm build
 docker compose --env-file .env -f deploy/docker-compose.yml config
 ```
 
-真实部署还需要在两个独立网络的浏览器中验收 UDP、ICE/TCP 和 TURN/TLS 回退；用声卡或
-乐器执行实际音频模式验收，并检查 LiveKit/Caddy 日志与防火墙安全组。Docker 化 LiveKit
-在生产中应使用 host networking 或等价的直达端口映射，以避免 NAT 破坏候选地址。
+真实部署需要在两个独立网络的浏览器中创建并加入同一房间，确认双方可听见对方、成员
+说话状态会变化、麦克风切换与静音正常。分别验收 UDP 优先链路、阻断 UDP 后的 ICE/TCP
+回退、以及再受限网络下的 TURN/TLS 回退；随后用声卡或乐器在原声模式下确认持续弱音和
+尾音不被截断。检查 LiveKit/Caddy 日志与防火墙安全组。Docker 化 LiveKit 在生产中应使用
+host networking 或等价的直达端口映射，以避免 NAT 破坏候选地址。
 
 官方参考：[部署](https://docs.livekit.io/transport/self-hosting/deployment/)、
 [VM 生成器](https://docs.livekit.io/transport/self-hosting/vm/)、

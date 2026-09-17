@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 
 const environment = {
   LIVEKIT_URL: 'wss://livekit.example.test',
+  LIVEKIT_PUBLIC_URL: 'wss://voice.example.test',
   LIVEKIT_API_KEY: 'test-key',
   LIVEKIT_API_SECRET: 'test-secret',
   LIVEKIT_TOKEN_TTL_SECONDS: '900',
@@ -29,6 +30,7 @@ describe('server configuration', () => {
       port: 3000,
       apiConfig: {
         livekitUrl: 'wss://livekit.example.test/',
+        livekitPublicUrl: 'wss://voice.example.test/',
         tokenTtlSeconds: 900,
         rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1000 },
         roomCacheMaxEntries: 100,
@@ -60,8 +62,14 @@ describe('server configuration', () => {
     expect(loadServerConfig({ ...environment, LIVEKIT_REQUEST_TIMEOUT_MS: value }).apiConfig.livekitRequestTimeoutMs).toBe(Number(value));
   });
 
-  it('rejects a non-WebSocket LiveKit URL', () => {
-    expect(() => loadServerConfig({ ...environment, LIVEKIT_URL: 'https://livekit.example.test' })).toThrow('LIVEKIT_URL must be a ws or wss URL');
+  it('keeps the internal RoomService URL separate from the browser-facing LiveKit URL', () => {
+    const config = loadServerConfig({ ...environment, LIVEKIT_URL: 'ws://livekit:7880', LIVEKIT_PUBLIC_URL: 'wss://voice.example.test' });
+    expect(config.apiConfig.livekitUrl).toBe('ws://livekit:7880/');
+    expect(config.apiConfig.livekitPublicUrl).toBe('wss://voice.example.test/');
+  });
+
+  it.each(['LIVEKIT_URL', 'LIVEKIT_PUBLIC_URL'])('rejects a non-WebSocket %s', (name) => {
+    expect(() => loadServerConfig({ ...environment, [name]: 'https://livekit.example.test' })).toThrow(`${name} must be a ws or wss URL`);
   });
 
   it('rejects an invalid trusted proxy CIDR', () => {
