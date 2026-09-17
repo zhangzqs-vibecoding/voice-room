@@ -47,3 +47,13 @@ test('API 镜像以 pnpm 10 兼容模式部署生产依赖', async () => {
   const dockerfile = await text('deploy/Dockerfile.api');
   assert.match(dockerfile, /pnpm --filter @voice-room\/api --prod deploy --legacy \/app/);
 });
+
+test('GHCR 发布工作流仅在 main 与版本标签推送镜像', async () => {
+  const workflow = await text('.github/workflows/publish-images.yml');
+  for (const value of ['push:', 'branches: [main]', "tags: ['v*']", 'packages: write', 'docker/login-action@v3', 'docker/build-push-action@v6', 'deploy/Dockerfile.api', 'deploy/Dockerfile.web']) {
+    assert.match(workflow, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.match(workflow, /build:\n\s+if: github\.event_name == 'pull_request'\n\s+permissions:\n\s+contents: read/);
+  assert.match(workflow, /publish:\n\s+if: github\.event_name == 'push'\n\s+permissions:\n\s+contents: read\n\s+packages: write/);
+  assert.match(workflow, /push: true/);
+});
