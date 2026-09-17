@@ -16,7 +16,7 @@ export interface LiveKitGateway {
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string>;
-  roomExists(roomName: string): Promise<boolean>;
+  roomExists(roomName: string, signal?: AbortSignal): Promise<boolean>;
 }
 
 export class RoomExpiredError extends Error {
@@ -102,16 +102,20 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     await new Promise<void>((resolve) => {
       let finished = false;
       let remaining = candidates.length;
+      const controller = new AbortController();
       const finish = () => {
         if (finished) return;
         finished = true;
         clearTimeout(timeout);
         resolve();
       };
-      const timeout = setTimeout(finish, options.config.roomSweepTimeoutMs);
+      const timeout = setTimeout(() => {
+        controller.abort();
+        finish();
+      }, options.config.roomSweepTimeoutMs);
       for (const [roomId, room] of candidates) {
         void Promise.resolve()
-          .then(() => options.livekit.roomExists(roomId))
+          .then(() => options.livekit.roomExists(roomId, controller.signal))
           .then((exists) => {
             if (finished || knownRooms.get(roomId) !== room) return;
             if (exists) room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;

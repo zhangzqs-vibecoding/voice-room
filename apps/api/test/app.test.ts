@@ -24,7 +24,11 @@ class FakeLiveKitGateway implements LiveKitGateway {
   readonly existingRoomIds = new Set<string>();
   readonly roomExistsCalls: string[] = [];
   readonly slowRoomIds = new Set<string>();
+  readonly neverResolvingRoomIds = new Set<string>();
   roomExistsDelayMs = 0;
+  activeRoomExistsQueries = 0;
+  maxActiveRoomExistsQueries = 0;
+  abortedRoomExistsQueries = 0;
   deferRoomCreation = false;
   deferTokenSigning = false;
   private readonly pendingRoomCreationResolutions: Array<() => void> = [];
@@ -59,8 +63,21 @@ class FakeLiveKitGateway implements LiveKitGateway {
     for (const resolve of this.pendingRoomCreationResolutions.splice(0)) resolve();
   }
 
-  async roomExists(roomName: string) {
+  async roomExists(roomName: string, signal?: AbortSignal) {
     this.roomExistsCalls.push(roomName);
+    if (this.neverResolvingRoomIds.has(roomName)) {
+      this.activeRoomExistsQueries += 1;
+      this.maxActiveRoomExistsQueries = Math.max(this.maxActiveRoomExistsQueries, this.activeRoomExistsQueries);
+      return new Promise<boolean>((_resolve, reject) => {
+        const abort = () => {
+          this.activeRoomExistsQueries -= 1;
+          this.abortedRoomExistsQueries += 1;
+          reject(new DOMException('Room lookup aborted', 'AbortError'));
+        };
+        if (signal?.aborted) abort();
+        else signal?.addEventListener('abort', abort, { once: true });
+      });
+    }
     if (this.slowRoomIds.has(roomName)) await new Promise((resolve) => setTimeout(resolve, this.roomExistsDelayMs));
     return this.existingRoomIds.size > 0 ? this.existingRoomIds.has(roomName) : this.roomStillExists;
   }
@@ -644,6 +661,30 @@ describe('voice room API', () => {
     expect(concurrent.statusCode).toBe(503);
     livekit.finishPendingRoomCreations();
     expect((await pending).statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('aborts timed-out room lookups so repeated full-cache sweeps do not accumulate them', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 28 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 25, roomSweepTimeoutMs: 15, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    for (let index = 0; index < 25; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    for (const room of livekit.createdRooms) livekit.neverResolvingRoomIds.add(room.name as string);
+    currentTime = 300_000;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(503);
+      expect(livekit.activeRoomExistsQueries).toBe(0);
+    }
+    expect(livekit.maxActiveRoomExistsQueries).toBeLessThanOrEqual(25);
+    expect(livekit.abortedRoomExistsQueries).toBeGreaterThan(0);
+    livekit.neverResolvingRoomIds.clear();
+    expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
     await app.close();
   });
 });

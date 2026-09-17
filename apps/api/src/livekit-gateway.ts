@@ -5,6 +5,8 @@ import { RoomExpiredError, type ApiConfig, type LiveKitGateway } from './app.js'
 
 export class LiveKitServerGateway implements LiveKitGateway {
   private readonly roomService: RoomServiceClient;
+  private readonly roomChecks = new Map<string, Promise<boolean>>();
+  private activeRoomChecks = 0;
 
   constructor(
     private readonly config: Pick<ApiConfig, 'livekitUrl' | 'apiKey' | 'apiSecret'>,
@@ -44,7 +46,33 @@ export class LiveKitServerGateway implements LiveKitGateway {
       .sign(createSecretKey(Buffer.from(this.config.apiSecret, 'utf8')));
   }
 
-  async roomExists(roomName: string): Promise<boolean> {
-    return (await this.roomService.listRooms([roomName])).some((room) => room.name === roomName);
+  async roomExists(roomName: string, signal?: AbortSignal): Promise<boolean> {
+    let check = this.roomChecks.get(roomName);
+    if (!check) {
+      if (this.activeRoomChecks >= 25) throw new Error('LiveKit room lookup capacity reached');
+      check = this.createRoomCheck(roomName);
+      this.roomChecks.set(roomName, check);
+    }
+    return this.waitForRoomCheck(check, signal);
+  }
+
+  private async createRoomCheck(roomName: string): Promise<boolean> {
+    this.activeRoomChecks += 1;
+    try {
+      return (await this.roomService.listRooms([roomName])).some((room) => room.name === roomName);
+    } finally {
+      this.activeRoomChecks -= 1;
+      this.roomChecks.delete(roomName);
+    }
+  }
+
+  private waitForRoomCheck(check: Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+    if (!signal) return check;
+    if (signal.aborted) return Promise.reject(new DOMException('Room lookup aborted', 'AbortError'));
+    return new Promise<boolean>((resolve, reject) => {
+      const abort = () => reject(new DOMException('Room lookup aborted', 'AbortError'));
+      signal.addEventListener('abort', abort, { once: true });
+      void check.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
   }
 }
