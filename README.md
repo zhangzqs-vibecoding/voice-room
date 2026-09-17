@@ -24,8 +24,10 @@ API 在加入审核时检查 5 分钟生命周期：到期且 SFU 房间已不�
 声称实时侦测未来的离开事件。API 仅在 JWT 同时签名时最多保留 10 个槽位，签名完成就
 释放；LiveKit 的 `maxParticipants` 是实际在线人数的最终容量限制。
 
-本地开发保持 `TRUST_PROXY=false`。部署在 Caddy 等受信任反向代理之后时，将根 `.env`
-中的 `TRUST_PROXY` 设为 `true`，使限流按转发客户端 IP 生效。
+本地开发保持 `TRUSTED_PROXY_CIDRS` 为空。部署在 Caddy 等反向代理之后时，填写代理
+实际来源的内部 IP 或 CIDR（例如 `172.18.0.0/16`）；仅这些代理的
+`X-Forwarded-For` 会用于限流，避免客户端伪造转发地址。`ROOM_SWEEP_TIMEOUT_MS` 限制
+缓存满时并行 SFU 清扫的总等待时间；超时且未腾出位置会返回 `room_cache_full`。
 
 运行验证：
 

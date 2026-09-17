@@ -8,7 +8,8 @@ const config = {
   apiSecret: 'secret',
   tokenTtlSeconds: 900,
   roomCacheMaxEntries: 1_000,
-  trustProxy: false,
+  trustedProxyCidrs: [],
+  roomSweepTimeoutMs: 25,
   rateLimit: { max: 3, timeWindowMs: 60_000, maxKeys: 1_000 }
 };
 
@@ -20,6 +21,10 @@ class FakeLiveKitGateway implements LiveKitGateway {
   shouldExpireToken = false;
   tokenExpirationFailuresRemaining = 0;
   roomStillExists = false;
+  readonly existingRoomIds = new Set<string>();
+  readonly roomExistsCalls: string[] = [];
+  readonly slowRoomIds = new Set<string>();
+  roomExistsDelayMs = 0;
   deferTokenSigning = false;
   private readonly pendingTokenResolutions: Array<() => void> = [];
 
@@ -45,8 +50,10 @@ class FakeLiveKitGateway implements LiveKitGateway {
     for (const resolve of this.pendingTokenResolutions.splice(0)) resolve();
   }
 
-  async roomExists() {
-    return this.roomStillExists;
+  async roomExists(roomName: string) {
+    this.roomExistsCalls.push(roomName);
+    if (this.slowRoomIds.has(roomName)) await new Promise((resolve) => setTimeout(resolve, this.roomExistsDelayMs));
+    return this.existingRoomIds.size > 0 ? this.existingRoomIds.has(roomName) : this.roomStillExists;
   }
 }
 
@@ -437,26 +444,28 @@ describe('voice room API', () => {
     await app.close();
   });
 
-  it('uses forwarded addresses only when TRUST_PROXY is enabled', async () => {
-    const disabled = createApp({
-      config: { ...config, trustProxy: false, roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
+  it('does not trust forged forwarded addresses from a non-allowlisted peer', async () => {
+    const app = createApp({
+      config: { ...config, trustedProxyCidrs: ['127.0.0.1/32'], roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
       livekit: new FakeLiveKitGateway()
     });
-    const disabledFirst = await disabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.1' } });
-    const disabledSecond = await disabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.2' } });
-    expect(disabledFirst.statusCode).toBe(201);
-    expect(disabledSecond.statusCode).toBe(429);
-    await disabled.close();
+    const first = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.10', headers: { 'x-forwarded-for': '198.51.100.1' } });
+    const second = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '203.0.113.10', headers: { 'x-forwarded-for': '198.51.100.2' } });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(429);
+    await app.close();
+  });
 
-    const enabled = createApp({
-      config: { ...config, trustProxy: true, roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
+  it('uses forwarded addresses only from an allowlisted proxy', async () => {
+    const app = createApp({
+      config: { ...config, trustedProxyCidrs: ['127.0.0.1/32'], roomCacheMaxEntries: 10, rateLimit: { max: 1, timeWindowMs: 60_000, maxKeys: 10 } },
       livekit: new FakeLiveKitGateway()
     });
-    const enabledFirst = await enabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.1' } });
-    const enabledSecond = await enabled.inject({ method: 'POST', url: '/api/rooms', headers: { 'x-forwarded-for': '198.51.100.2' } });
-    expect(enabledFirst.statusCode).toBe(201);
-    expect(enabledSecond.statusCode).toBe(201);
-    await enabled.close();
+    const first = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': '198.51.100.1' } });
+    const second = await app.inject({ method: 'POST', url: '/api/rooms', remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': '198.51.100.2' } });
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    await app.close();
   });
 
   it('sweeps expired missing rooms before creating a new cached room', async () => {
@@ -464,7 +473,7 @@ describe('voice room API', () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
-      config: { ...config, trustProxy: false, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
+      config: { ...config, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
       livekit,
       roomId: () => roomIds.shift() ?? 'room_cccccccccccccccccccc',
       now: () => currentTime
@@ -481,7 +490,7 @@ describe('voice room API', () => {
     livekit.roomStillExists = true;
     let currentTime = 0;
     const app = createApp({
-      config: { ...config, trustProxy: false, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
+      config: { ...config, roomCacheMaxEntries: 1, rateLimit: { max: 10, timeWindowMs: 60_000, maxKeys: 10 } },
       livekit,
       roomId: () => roomIds.shift() ?? 'room_cccccccccccccccccccc',
       now: () => currentTime
@@ -489,6 +498,50 @@ describe('voice room API', () => {
     expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
     currentTime = 300_000;
     const response = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: 'room_cache_full' });
+    await app.close();
+  });
+
+  it('does not sweep unrelated expired rooms before joining an active target room', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 26 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 26, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    for (let index = 0; index < 26; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    const targetRoomId = livekit.createdRooms[25]?.name as string;
+    livekit.existingRoomIds.add(targetRoomId);
+    for (const room of livekit.createdRooms.slice(0, 25)) livekit.slowRoomIds.add(room.name as string);
+    livekit.roomExistsDelayMs = 50;
+    currentTime = 300_000;
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${targetRoomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox' } });
+    expect(response.statusCode).toBe(200);
+    expect(livekit.roomExistsCalls).toEqual([targetRoomId]);
+    await app.close();
+  });
+
+  it('bounds a full-cache sweep instead of waiting once per expired room', async () => {
+    const livekit = new FakeLiveKitGateway();
+    const roomIds = Array.from({ length: 26 }, (_, index) => `room_${index.toString(36).padStart(20, 'a')}`);
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, roomCacheMaxEntries: 25, roomSweepTimeoutMs: 15, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
+      livekit,
+      roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
+      now: () => currentTime
+    });
+    for (let index = 0; index < 25; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    for (const room of livekit.createdRooms) livekit.slowRoomIds.add(room.name as string);
+    livekit.roomExistsDelayMs = 50;
+    currentTime = 300_000;
+    const startedAt = Date.now();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(Date.now() - startedAt).toBeLessThan(200);
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({ error: 'room_cache_full' });
     await app.close();

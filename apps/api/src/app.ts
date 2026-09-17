@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import { compileTrustedProxy } from './trusted-proxy.js';
 
 export const AVATAR_IDS = ['fox', 'cat', 'otter', 'owl', 'panda', 'rabbit'] as const;
 type AvatarId = (typeof AVATAR_IDS)[number];
@@ -28,7 +29,8 @@ export interface ApiConfig {
   apiSecret: string;
   tokenTtlSeconds: number;
   roomCacheMaxEntries: number;
-  trustProxy: boolean;
+  roomSweepTimeoutMs: number;
+  trustedProxyCidrs: string[];
   rateLimit: { max: number; timeWindowMs: number; maxKeys: number };
 }
 
@@ -75,7 +77,7 @@ const parseJoin = (body: unknown): { nickname: string; avatarId: AvatarId } | un
 };
 
 export const createApp = (options: CreateAppOptions): FastifyInstance => {
-  const app = Fastify({ logger: false, trustProxy: options.config.trustProxy });
+  const app = Fastify({ logger: false, trustProxy: compileTrustedProxy(options.config.trustedProxyCidrs) });
   const knownRooms = new Map<string, RoomState>();
   const rateLimits = new Map<string, RateLimitEntry>();
   const createRoomId = options.roomId ?? defaultRoomId;
@@ -84,17 +86,28 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 
   const sweepKnownRooms = async (): Promise<void> => {
     const sweepTime = now();
-    let visited = 0;
-    for (const [roomId, room] of knownRooms) {
-      if (visited >= ROOM_SWEEP_BATCH_SIZE) return;
-      visited += 1;
-      if (room.expiresAt > sweepTime) continue;
+    const candidates = [...knownRooms.entries()]
+      .filter(([, room]) => room.expiresAt <= sweepTime)
+      .slice(0, ROOM_SWEEP_BATCH_SIZE);
+    if (candidates.length === 0) return;
+    const lookups = Promise.all(candidates.map(async ([roomId, room]) => {
       try {
-        if (await options.livekit.roomExists(roomId)) room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;
-        else knownRooms.delete(roomId);
+        return { roomId, room, exists: await options.livekit.roomExists(roomId) };
       } catch {
-        // Keep the room on transient SFU errors; join will report the service error if needed.
+        return undefined;
       }
+    }));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const results = await Promise.race([
+      lookups,
+      new Promise<undefined>((resolve) => { timeout = setTimeout(() => resolve(undefined), options.config.roomSweepTimeoutMs); })
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (!results) return;
+    for (const result of results) {
+      if (!result) continue;
+      if (result.exists) result.room.expiresAt = sweepTime + ROOM_LINK_LIFETIME_MS;
+      else knownRooms.delete(result.roomId);
     }
   };
 
@@ -149,8 +162,10 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.post('/api/rooms', async (_request, reply) => {
-    await sweepKnownRooms();
-    if (knownRooms.size >= options.config.roomCacheMaxEntries) return reply.code(503).send({ error: 'room_cache_full' });
+    if (knownRooms.size >= options.config.roomCacheMaxEntries) {
+      await sweepKnownRooms();
+      if (knownRooms.size >= options.config.roomCacheMaxEntries) return reply.code(503).send({ error: 'room_cache_full' });
+    }
     const roomId = createRoomId();
     if (!ROOM_ID_PATTERN.test(roomId)) return reply.code(502).send({ error: 'room_service_unavailable' });
     try {
@@ -163,7 +178,6 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   });
 
   app.post('/api/rooms/:roomId/join', async (request, reply) => {
-    await sweepKnownRooms();
     const { roomId } = request.params as { roomId: string };
     const room = knownRooms.get(roomId);
     if (!room) return reply.code(404).send({ error: 'room_not_found' });

@@ -17,7 +17,8 @@ const environment = {
   RATE_LIMIT_WINDOW_MS: '60000',
   RATE_LIMIT_MAX_KEYS: '1000',
   MAX_KNOWN_ROOMS: '100',
-  TRUST_PROXY: 'false',
+  ROOM_SWEEP_TIMEOUT_MS: '100',
+  TRUSTED_PROXY_CIDRS: '127.0.0.1/32,10.0.0.0/8',
   PORT: '3000'
 };
 
@@ -30,7 +31,8 @@ describe('server configuration', () => {
         tokenTtlSeconds: 900,
         rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1000 },
         roomCacheMaxEntries: 100,
-        trustProxy: false
+        roomSweepTimeoutMs: 100,
+        trustedProxyCidrs: ['127.0.0.1/32', '10.0.0.0/8']
       }
     });
   });
@@ -41,7 +43,8 @@ describe('server configuration', () => {
     ['RATE_LIMIT_MAX', 'NaN'],
     ['RATE_LIMIT_WINDOW_MS', '-1'],
     ['RATE_LIMIT_MAX_KEYS', '1.5'],
-    ['MAX_KNOWN_ROOMS', '0']
+    ['MAX_KNOWN_ROOMS', '0'],
+    ['ROOM_SWEEP_TIMEOUT_MS', '0']
   ])('rejects an invalid positive integer for %s', (name, value) => {
     expect(() => loadServerConfig({ ...environment, [name]: value })).toThrow(`${name} must be a positive integer`);
   });
@@ -50,8 +53,8 @@ describe('server configuration', () => {
     expect(() => loadServerConfig({ ...environment, LIVEKIT_URL: 'https://livekit.example.test' })).toThrow('LIVEKIT_URL must be a ws or wss URL');
   });
 
-  it('rejects an invalid TRUST_PROXY value', () => {
-    expect(() => loadServerConfig({ ...environment, TRUST_PROXY: 'yes' })).toThrow('TRUST_PROXY must be true or false');
+  it('rejects an invalid trusted proxy CIDR', () => {
+    expect(() => loadServerConfig({ ...environment, TRUSTED_PROXY_CIDRS: 'not-a-cidr' })).toThrow('TRUSTED_PROXY_CIDRS contains an invalid IP or CIDR');
   });
 
   it('requires every LiveKit credential', () => {
