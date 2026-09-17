@@ -18,6 +18,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   shouldFailCreate = false;
   shouldFailToken = false;
   shouldExpireToken = false;
+  tokenExpirationFailuresRemaining = 0;
   roomStillExists = false;
   deferTokenSigning = false;
   private readonly pendingTokenResolutions: Array<() => void> = [];
@@ -29,7 +30,10 @@ class FakeLiveKitGateway implements LiveKitGateway {
 
   async createAccessToken(input: Record<string, unknown>) {
     if (this.shouldFailToken) throw new Error('LiveKit token signing unavailable');
-    if (this.shouldExpireToken) throw Object.assign(new Error('Room expired while signing'), { code: 'room_expired' });
+    if (this.shouldExpireToken || this.tokenExpirationFailuresRemaining > 0) {
+      this.tokenExpirationFailuresRemaining -= 1;
+      throw Object.assign(new Error('Room expired while signing'), { code: 'room_expired' });
+    }
     this.createdTokens.push(input);
     if (this.deferTokenSigning) {
       await new Promise<void>((resolve) => this.pendingTokenResolutions.push(resolve));
@@ -255,7 +259,7 @@ describe('voice room API', () => {
     await app.close();
   });
 
-  it('does not issue a token with less than one second of room lifetime remaining', async () => {
+  it('returns 404 with less than one second remaining when the SFU room is missing', async () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
@@ -273,6 +277,28 @@ describe('voice room API', () => {
     });
     expect(response.statusCode).toBe(404);
     expect(livekit.createdTokens).toHaveLength(0);
+    await app.close();
+  });
+
+  it('renews a room with less than one second remaining when the SFU room exists', async () => {
+    const livekit = new FakeLiveKitGateway();
+    livekit.roomStillExists = true;
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    currentTime = 299_001;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(livekit.createdTokens[0]?.expiresAtMs).toBe(599_001);
     await app.close();
   });
 
@@ -328,6 +354,21 @@ describe('voice room API', () => {
     });
     expect(retry.statusCode).toBe(404);
     expect(livekit.createdTokens).toHaveLength(0);
+    await app.close();
+  });
+
+  it('renews and retries once when signing detects expiry but the SFU room exists', async () => {
+    const { app, livekit } = buildApp();
+    livekit.roomStillExists = true;
+    livekit.tokenExpirationFailuresRemaining = 1;
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(livekit.createdTokens).toHaveLength(1);
     await app.close();
   });
 

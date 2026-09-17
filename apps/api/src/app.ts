@@ -55,6 +55,8 @@ interface RateLimitEntry {
   expiresAt: number;
 }
 
+type RoomRefreshResult = 'renewed' | 'missing' | 'unavailable';
+
 const ROOM_SWEEP_BATCH_SIZE = 25;
 const RATE_LIMIT_SWEEP_BATCH_SIZE = 10;
 
@@ -93,6 +95,19 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
       } catch {
         // Keep the room on transient SFU errors; join will report the service error if needed.
       }
+    }
+  };
+
+  const refreshExpiredRoom = async (roomId: string, room: RoomState): Promise<RoomRefreshResult> => {
+    try {
+      if (!await options.livekit.roomExists(roomId)) {
+        knownRooms.delete(roomId);
+        return 'missing';
+      }
+      room.expiresAt = now() + ROOM_LINK_LIFETIME_MS;
+      return 'renewed';
+    } catch {
+      return 'unavailable';
     }
   };
 
@@ -154,20 +169,9 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (!room) return reply.code(404).send({ error: 'room_not_found' });
     const requestTime = now();
     if (requestTime >= room.expiresAt) {
-      try {
-        if (!await options.livekit.roomExists(roomId)) {
-          knownRooms.delete(roomId);
-          return reply.code(404).send({ error: 'room_not_found' });
-        }
-        room.expiresAt = requestTime + ROOM_LINK_LIFETIME_MS;
-      } catch {
-        return reply.code(502).send({ error: 'room_service_unavailable' });
-      }
-    }
-    const remainingTtlSeconds = Math.floor((room.expiresAt - now()) / 1000);
-    if (remainingTtlSeconds < 1) {
-      knownRooms.delete(roomId);
-      return reply.code(404).send({ error: 'room_not_found' });
+      const refreshResult = await refreshExpiredRoom(roomId, room);
+      if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+      if (refreshResult === 'unavailable') return reply.code(502).send({ error: 'room_service_unavailable' });
     }
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
@@ -178,26 +182,40 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     const participantId = createParticipantId();
     const metadata = JSON.stringify(identity);
     room.reservedParticipants += 1;
-    try {
-      const token = await options.livekit.createAccessToken({
-        participantId,
-        name: identity.nickname,
-        roomName: roomId,
-        metadata,
-        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
-        maximumTtlSeconds: options.config.tokenTtlSeconds,
-        expiresAtMs: room.expiresAt
-      });
-      room.reservedParticipants -= 1;
-      return { participantId, livekitUrl: options.config.livekitUrl, token };
-    } catch (error) {
-      room.reservedParticipants -= 1;
-      if (isRoomExpiredError(error)) {
-        knownRooms.delete(roomId);
-        return reply.code(404).send({ error: 'room_not_found' });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (Math.floor((room.expiresAt - now()) / 1000) < 1) {
+        const refreshResult = await refreshExpiredRoom(roomId, room);
+        if (refreshResult === 'renewed') continue;
+        room.reservedParticipants -= 1;
+        if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+        return reply.code(502).send({ error: 'room_service_unavailable' });
       }
-      return reply.code(502).send({ error: 'token_service_unavailable' });
+      try {
+        const token = await options.livekit.createAccessToken({
+          participantId,
+          name: identity.nickname,
+          roomName: roomId,
+          metadata,
+          grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
+          maximumTtlSeconds: options.config.tokenTtlSeconds,
+          expiresAtMs: room.expiresAt
+        });
+        room.reservedParticipants -= 1;
+        return { participantId, livekitUrl: options.config.livekitUrl, token };
+      } catch (error) {
+        if (!isRoomExpiredError(error)) {
+          room.reservedParticipants -= 1;
+          return reply.code(502).send({ error: 'token_service_unavailable' });
+        }
+        const refreshResult = await refreshExpiredRoom(roomId, room);
+        if (refreshResult === 'renewed' && attempt === 0) continue;
+        room.reservedParticipants -= 1;
+        if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+        return reply.code(502).send({ error: 'token_service_unavailable' });
+      }
     }
+    room.reservedParticipants -= 1;
+    return reply.code(502).send({ error: 'token_service_unavailable' });
   });
 
   return app;
