@@ -10,6 +10,7 @@ const config = {
   roomCacheMaxEntries: 1_000,
   trustedProxyCidrs: [],
   roomSweepTimeoutMs: 25,
+  livekitRequestTimeoutMs: 25,
   rateLimit: { max: 3, timeWindowMs: 60_000, maxKeys: 1_000 }
 };
 
@@ -17,6 +18,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   createdRooms: Array<Record<string, unknown>> = [];
   createdTokens: Array<Record<string, unknown>> = [];
   shouldFailCreate = false;
+  neverResolvingCreate = false;
   shouldFailToken = false;
   shouldExpireToken = false;
   tokenExpirationFailuresRemaining = 0;
@@ -25,6 +27,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   readonly roomExistsCalls: string[] = [];
   readonly slowRoomIds = new Set<string>();
   readonly neverResolvingRoomIds = new Set<string>();
+  readonly abortIgnoringRoomIds = new Set<string>();
   roomExistsDelayMs = 0;
   activeRoomExistsQueries = 0;
   maxActiveRoomExistsQueries = 0;
@@ -37,6 +40,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
     this.createdRooms.push(options);
+    if (this.neverResolvingCreate) await new Promise<void>(() => undefined);
     if (this.deferRoomCreation) {
       await new Promise<void>((resolve) => this.pendingRoomCreationResolutions.push(resolve));
     }
@@ -74,6 +78,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
           this.abortedRoomExistsQueries += 1;
           reject(new DOMException('Room lookup aborted', 'AbortError'));
         };
+        if (this.abortIgnoringRoomIds.has(roomName)) return;
         if (signal?.aborted) abort();
         else signal?.addEventListener('abort', abort, { once: true });
       });
@@ -242,6 +247,24 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('maps unsupported content types to the stable validation error', async () => {
+    const { app } = buildApp();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms', headers: { 'content-type': 'text/plain' }, payload: 'not json' });
+    expect(response.statusCode).toBe(415);
+    expect(response.json()).toEqual({ error: 'invalid_request' });
+    await app.close();
+  });
+
+  it('times out a hanging LiveKit room creation', async () => {
+    const { app, livekit } = buildApp({ config: { ...config, livekitRequestTimeoutMs: 15 } });
+    livekit.neverResolvingCreate = true;
+    const startedAt = Date.now();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms' });
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(response.statusCode).toBe(503);
+    await app.close();
+  });
+
   it('rejects joins to a room the API did not create', async () => {
     const { app } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: 'Lee', avatarId: 'fox' } });
@@ -289,6 +312,27 @@ describe('voice room API', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens[0]?.expiresAtMs).toBe(600_000);
+    await app.close();
+  });
+
+  it('times out an expired-room lookup that ignores abort signals', async () => {
+    const livekit = new FakeLiveKitGateway();
+    let currentTime = 0;
+    const app = createApp({
+      config: { ...config, livekitRequestTimeoutMs: 15, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
+      livekit,
+      roomId: () => 'room_abcdefghijklmnopqrstuv',
+      now: () => currentTime
+    });
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    const roomId = livekit.createdRooms[0]?.name as string;
+    livekit.neverResolvingRoomIds.add(roomId);
+    livekit.abortIgnoringRoomIds.add(roomId);
+    currentTime = 300_000;
+    const startedAt = Date.now();
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox' } });
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(response.statusCode).toBe(503);
     await app.close();
   });
 

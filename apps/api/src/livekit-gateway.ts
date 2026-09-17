@@ -9,13 +9,18 @@ export class LiveKitServerGateway implements LiveKitGateway {
   private activeRoomChecks = 0;
 
   constructor(
-    private readonly config: Pick<ApiConfig, 'livekitUrl' | 'apiKey' | 'apiSecret'>,
+    private readonly config: Pick<ApiConfig, 'livekitUrl' | 'apiKey' | 'apiSecret' | 'livekitRequestTimeoutMs'>,
     private readonly now: () => number = Date.now
   ) {
-    this.roomService = new RoomServiceClient(config.livekitUrl, config.apiKey, config.apiSecret);
+    this.roomService = new RoomServiceClient(config.livekitUrl, config.apiKey, config.apiSecret, {
+      requestTimeout: Math.ceil(config.livekitRequestTimeoutMs / 1_000),
+      failover: false
+    });
   }
 
-  async createRoom(options: { name: string; maxParticipants: number; emptyTimeout: number; departureTimeout: number }): Promise<void> {
+  async createRoom(options: { name: string; maxParticipants: number; emptyTimeout: number; departureTimeout: number }, signal?: AbortSignal): Promise<void> {
+    // The SDK has no AbortSignal API; its configured requestTimeout enforces the physical request deadline.
+    void signal;
     await this.roomService.createRoom(options);
   }
 
@@ -70,9 +75,13 @@ export class LiveKitServerGateway implements LiveKitGateway {
     if (!signal) return check;
     if (signal.aborted) return Promise.reject(new DOMException('Room lookup aborted', 'AbortError'));
     return new Promise<boolean>((resolve, reject) => {
-      const abort = () => reject(new DOMException('Room lookup aborted', 'AbortError'));
+      const cleanup = () => signal.removeEventListener('abort', abort);
+      const abort = () => {
+        cleanup();
+        reject(new DOMException('Room lookup aborted', 'AbortError'));
+      };
       signal.addEventListener('abort', abort, { once: true });
-      void check.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+      void check.then(resolve, reject).finally(cleanup);
     });
   }
 }

@@ -6,7 +6,7 @@ export const AVATAR_IDS = ['fox', 'cat', 'otter', 'owl', 'panda', 'rabbit'] as c
 type AvatarId = (typeof AVATAR_IDS)[number];
 
 export interface LiveKitGateway {
-  createRoom(options: { name: string; maxParticipants: number; emptyTimeout: number; departureTimeout: number }): Promise<void>;
+  createRoom(options: { name: string; maxParticipants: number; emptyTimeout: number; departureTimeout: number }, signal?: AbortSignal): Promise<void>;
   createAccessToken(input: {
     participantId: string;
     name: string;
@@ -30,6 +30,7 @@ export interface ApiConfig {
   tokenTtlSeconds: number;
   roomCacheMaxEntries: number;
   roomSweepTimeoutMs: number;
+  livekitRequestTimeoutMs: number;
   trustedProxyCidrs: string[];
   rateLimit: { max: number; timeWindowMs: number; maxKeys: number };
 }
@@ -57,7 +58,9 @@ interface RateLimitEntry {
   expiresAt: number;
 }
 
-type RoomRefreshResult = 'renewed' | 'missing' | 'unavailable';
+type RoomRefreshResult = 'renewed' | 'missing' | 'unavailable' | 'timed_out';
+
+class LiveKitTimeoutError extends Error {}
 
 const ROOM_SWEEP_BATCH_SIZE = 25;
 const RATE_LIMIT_SWEEP_BATCH_SIZE = 10;
@@ -85,6 +88,23 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
   const now = options.now ?? Date.now;
+
+  const withLiveKitDeadline = <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+      reject(new LiveKitTimeoutError());
+    }, options.config.livekitRequestTimeoutMs);
+    void Promise.resolve()
+      .then(() => operation(controller.signal))
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      }, (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
 
   const sweepKnownRooms = async (): Promise<void> => {
     const sweepTime = now();
@@ -132,13 +152,14 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 
   const refreshExpiredRoom = async (roomId: string, room: RoomState): Promise<RoomRefreshResult> => {
     try {
-      if (!await options.livekit.roomExists(roomId)) {
+      if (!await withLiveKitDeadline((signal) => options.livekit.roomExists(roomId, signal))) {
         knownRooms.delete(roomId);
         return 'missing';
       }
       room.expiresAt = now() + ROOM_LINK_LIFETIME_MS;
       return 'renewed';
-    } catch {
+    } catch (error) {
+      if (error instanceof LiveKitTimeoutError) return 'timed_out';
       return 'unavailable';
     }
   };
@@ -162,6 +183,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 
   app.addHook('onRequest', async (request, reply) => {
     if (!MUTATING_METHODS.has(request.method)) return;
+    const contentType = request.headers['content-type'];
+    if (contentType && !contentType.startsWith('application/json')) return reply.code(415).send({ error: 'invalid_request' });
     const key = clientAddress(request);
     const requestTime = now();
     sweepRateLimits(requestTime);
@@ -189,11 +212,11 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     }
     pendingCreates += 1;
     try {
-      await options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 });
+      await withLiveKitDeadline((signal) => options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 }, signal));
       knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0 });
       return reply.code(201).send({ roomId });
-    } catch {
-      return reply.code(502).send({ error: 'room_service_unavailable' });
+    } catch (error) {
+      return reply.code(error instanceof LiveKitTimeoutError ? 503 : 502).send({ error: 'room_service_unavailable' });
     } finally {
       pendingCreates -= 1;
     }
@@ -208,6 +231,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
       const refreshResult = await refreshExpiredRoom(roomId, room);
       if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
       if (refreshResult === 'unavailable') return reply.code(502).send({ error: 'room_service_unavailable' });
+      if (refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
     }
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
@@ -224,6 +248,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         if (refreshResult === 'renewed') continue;
         room.reservedParticipants -= 1;
         if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+        if (refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
         return reply.code(502).send({ error: 'room_service_unavailable' });
       }
       try {
@@ -247,6 +272,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         if (refreshResult === 'renewed' && attempt === 0) continue;
         room.reservedParticipants -= 1;
         if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+        if (refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
         return reply.code(502).send({ error: 'token_service_unavailable' });
       }
     }

@@ -43,6 +43,7 @@ export const loadServerConfig = (environment: NodeJS.ProcessEnv): ServerConfig =
       tokenTtlSeconds: positiveInteger(environment, 'LIVEKIT_TOKEN_TTL_SECONDS', '900'),
       roomCacheMaxEntries: positiveInteger(environment, 'MAX_KNOWN_ROOMS', '10000'),
       roomSweepTimeoutMs: positiveInteger(environment, 'ROOM_SWEEP_TIMEOUT_MS', '100'),
+      livekitRequestTimeoutMs: positiveInteger(environment, 'LIVEKIT_REQUEST_TIMEOUT_MS', '1000'),
       trustedProxyCidrs: parseTrustedProxyCidrs(environment.TRUSTED_PROXY_CIDRS),
       rateLimit: {
         max: positiveInteger(environment, 'RATE_LIMIT_MAX', '30'),

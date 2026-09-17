@@ -28,6 +28,7 @@ API 在加入审核时检查 5 分钟生命周期：到期且 SFU 房间已不�
 实际来源的内部 IP 或 CIDR（例如 `172.18.0.0/16`）；仅这些代理的
 `X-Forwarded-For` 会用于限流，避免客户端伪造转发地址。`ROOM_SWEEP_TIMEOUT_MS` 限制
 缓存满时并行 SFU 清扫的总等待时间；超时且未腾出位置会返回 `room_cache_full`。
+`LIVEKIT_REQUEST_TIMEOUT_MS` 限制创建房间和加入审核的上游 LiveKit 等待时间。
 
 运行验证：
 

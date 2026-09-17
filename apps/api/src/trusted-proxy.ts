@@ -31,7 +31,7 @@ const parseRange = (value: string): CidrRange => {
   if (version === 0) invalid();
   const bits = version === 4 ? 32 : 128;
   const prefix = prefixText === undefined ? bits : Number(prefixText);
-  if (prefix < 0 || prefix > bits) invalid();
+  if (prefix <= 0 || prefix > bits) invalid();
   return { address: version === 4 ? ipv4ToBigInt(address) : ipv6ToBigInt(address), bits, prefix };
 };
 
