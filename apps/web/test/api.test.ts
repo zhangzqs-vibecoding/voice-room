@@ -5,7 +5,7 @@ describe('房间 API 客户端', () => {
   it('创建房间并返回邀请使用的房间 ID', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ roomId: 'room_a' }), { status: 201 }));
     await expect(createRoom(fetcher)).resolves.toBe('room_a');
-    expect(fetcher).toHaveBeenCalledWith('/api/rooms', expect.objectContaining({ method: 'POST' }));
+    expect(fetcher).toHaveBeenCalledWith('/api/rooms', { method: 'POST' });
   });
 
   it('带身份信息加入房间', async () => {
