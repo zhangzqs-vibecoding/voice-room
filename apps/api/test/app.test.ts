@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { createApp, type LiveKitGateway } from '../src/app.js';
 import { LiveKitServerGateway } from '../src/livekit-gateway.js';
 
@@ -16,7 +16,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   shouldFailCreate = false;
   shouldFailToken = false;
   shouldExpireToken = false;
-  activeParticipantCount = 0;
+  roomStillExists = false;
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -30,8 +30,8 @@ class FakeLiveKitGateway implements LiveKitGateway {
     return JSON.stringify(input);
   }
 
-  async getParticipantCount() {
-    return this.activeParticipantCount;
+  async roomExists() {
+    return this.roomStillExists;
   }
 }
 
@@ -49,31 +49,32 @@ const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
 };
 
 describe('voice room API', () => {
-  it('signs a JWT whose expiration never exceeds the absolute room expiry', async () => {
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(new Date('2030-01-01T00:00:00.500Z'));
-      const expiresAtMs = Date.now() + 1_500;
-      const livekit = new LiveKitServerGateway(config);
-      const token = await livekit.createAccessToken({
-        participantId: 'participant_123',
-        roomName: 'room_abcdefghijklmnopqrstuv',
-        metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
-        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
-        maximumTtlSeconds: 900,
-        expiresAtMs
-      } as Parameters<typeof livekit.createAccessToken>[0]);
-      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
-      expect(payload.exp * 1_000).toBeLessThanOrEqual(expiresAtMs);
-    } finally {
-      vi.useRealTimers();
-    }
+  it('signs the precise absolute room expiration after the signer clock advances', async () => {
+    const startedAtMs = Math.floor(Date.now() / 1_000) * 1_000 + 100;
+    const expiresAtMs = startedAtMs + 5_000;
+    let signerNowMs = startedAtMs;
+    const livekit = new LiveKitServerGateway(config, () => signerNowMs);
+    signerNowMs += 1_100;
+    const token = await livekit.createAccessToken({
+      participantId: 'participant_123',
+      name: 'Lee',
+      roomName: 'room_abcdefghijklmnopqrstuv',
+      metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
+      grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
+      maximumTtlSeconds: 900,
+      expiresAtMs
+    });
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    expect(payload.iat * 1_000).toBe(Math.floor(signerNowMs / 1_000) * 1_000);
+    expect(payload.exp * 1_000).toBe(Math.floor(expiresAtMs / 1_000) * 1_000);
+    expect(payload.exp * 1_000).toBeLessThanOrEqual(expiresAtMs);
   });
 
   it('creates a LiveKit JWT that can join only the requested room', async () => {
     const livekit = new LiveKitServerGateway(config);
     const token = await livekit.createAccessToken({
       participantId: 'participant_123',
+      name: 'Lee',
       roomName: 'room_abcdefghijklmnopqrstuv',
       metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
       grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
@@ -82,6 +83,7 @@ describe('voice room API', () => {
     });
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
     expect(payload.sub).toBe('participant_123');
+    expect(payload.name).toBe('Lee');
     expect(payload.metadata).toBe(JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }));
     expect(payload.video).toMatchObject({ room: 'room_abcdefghijklmnopqrstuv', roomJoin: true, canPublish: true, canSubscribe: true });
     expect(payload.video).toMatchObject({ canPublishData: false, canPublishSources: ['microphone'] });
@@ -163,7 +165,7 @@ describe('voice room API', () => {
     await app.close();
   });
 
-  it('rejects a join after the room link has expired five minutes after creation', async () => {
+  it('rejects a join after the room link expires when the SFU room no longer exists', async () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
@@ -184,7 +186,7 @@ describe('voice room API', () => {
     await app.close();
   });
 
-  it('renews a room at the join audit point when the SFU still has active members', async () => {
+  it('renews a room when the SFU keeps an empty room during departure timeout', async () => {
     const livekit = new FakeLiveKitGateway();
     let currentTime = 0;
     const app = createApp({
@@ -194,7 +196,7 @@ describe('voice room API', () => {
       now: () => currentTime
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
-    livekit.activeParticipantCount = 1;
+    livekit.roomStillExists = true;
     currentTime = 300_000;
     const response = await app.inject({
       method: 'POST',

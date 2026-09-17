@@ -8,13 +8,14 @@ export interface LiveKitGateway {
   createRoom(options: { name: string; maxParticipants: number; emptyTimeout: number; departureTimeout: number }): Promise<void>;
   createAccessToken(input: {
     participantId: string;
+    name: string;
     roomName: string;
     metadata: string;
     grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string>;
-  getParticipantCount(roomName: string): Promise<number>;
+  roomExists(roomName: string): Promise<boolean>;
 }
 
 export class RoomExpiredError extends Error {
@@ -111,7 +112,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     const requestTime = now();
     if (requestTime >= room.expiresAt) {
       try {
-        if (await options.livekit.getParticipantCount(roomId) === 0) {
+        if (!await options.livekit.roomExists(roomId)) {
           knownRooms.delete(roomId);
           return reply.code(404).send({ error: 'room_not_found' });
         }
@@ -137,6 +138,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     try {
       const token = await options.livekit.createAccessToken({
         participantId,
+        name: identity.nickname,
         roomName: roomId,
         metadata,
         grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },

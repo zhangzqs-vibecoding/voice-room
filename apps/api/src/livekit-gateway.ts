@@ -1,4 +1,6 @@
-import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk';
+import { createSecretKey } from 'node:crypto';
+import { SignJWT } from 'jose';
+import { RoomServiceClient } from 'livekit-server-sdk';
 import { RoomExpiredError, type ApiConfig, type LiveKitGateway } from './app.js';
 
 export class LiveKitServerGateway implements LiveKitGateway {
@@ -17,25 +19,32 @@ export class LiveKitServerGateway implements LiveKitGateway {
 
   async createAccessToken(input: {
     participantId: string;
+    name: string;
     roomName: string;
     metadata: string;
     grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string> {
-    const remainingTtlSeconds = Math.floor((input.expiresAtMs - this.now()) / 1_000);
-    const ttlSeconds = Math.min(input.maximumTtlSeconds, remainingTtlSeconds);
-    if (ttlSeconds < 1) throw new RoomExpiredError('Room expired before token signing');
-    const token = new AccessToken(this.config.apiKey, this.config.apiSecret, {
-      identity: input.participantId,
+    const issuedAtSeconds = Math.floor(this.now() / 1_000);
+    const expiresAtSeconds = Math.floor(input.expiresAtMs / 1_000);
+    const expiresAt = Math.min(expiresAtSeconds, issuedAtSeconds + input.maximumTtlSeconds);
+    if (expiresAt <= issuedAtSeconds) throw new RoomExpiredError('Room expired before token signing');
+    return new SignJWT({
+      name: input.name,
       metadata: input.metadata,
-      ttl: `${ttlSeconds}s`
-    });
-    token.addGrant({ ...input.grants, room: input.roomName, canPublishData: false, canPublishSources: [TrackSource.MICROPHONE] });
-    return token.toJwt();
+      video: { ...input.grants, room: input.roomName, canPublishData: false, canPublishSources: ['microphone'] }
+    })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setIssuer(this.config.apiKey)
+      .setSubject(input.participantId)
+      .setIssuedAt(issuedAtSeconds)
+      .setNotBefore(issuedAtSeconds)
+      .setExpirationTime(expiresAt)
+      .sign(createSecretKey(Buffer.from(this.config.apiSecret, 'utf8')));
   }
 
-  async getParticipantCount(roomName: string): Promise<number> {
-    return (await this.roomService.listParticipants(roomName)).length;
+  async roomExists(roomName: string): Promise<boolean> {
+    return (await this.roomService.listRooms([roomName])).some((room) => room.name === roomName);
   }
 }
