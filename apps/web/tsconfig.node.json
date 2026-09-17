@@ -1,0 +1,1 @@
+{ "extends": "./tsconfig.json", "compilerOptions": { "noEmit": false, "outDir": "dist-ts", "tsBuildInfoFile": "node_modules/.tmp/tsconfig.node.tsbuildinfo" }, "include": ["vite.config.ts"] }
