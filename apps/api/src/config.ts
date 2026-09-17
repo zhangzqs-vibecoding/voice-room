@@ -20,6 +20,12 @@ const positiveInteger = (environment: NodeJS.ProcessEnv, name: string, fallback:
   return parsed;
 };
 
+const wholeSecondTimeout = (environment: NodeJS.ProcessEnv): number => {
+  const value = positiveInteger(environment, 'LIVEKIT_REQUEST_TIMEOUT_MS', '1000');
+  if (value % 1_000 !== 0) throw new Error('LIVEKIT_REQUEST_TIMEOUT_MS must be a positive multiple of 1000');
+  return value;
+};
+
 const parseLiveKitUrl = (value: string): string => {
   let url: URL;
   try {
@@ -43,7 +49,7 @@ export const loadServerConfig = (environment: NodeJS.ProcessEnv): ServerConfig =
       tokenTtlSeconds: positiveInteger(environment, 'LIVEKIT_TOKEN_TTL_SECONDS', '900'),
       roomCacheMaxEntries: positiveInteger(environment, 'MAX_KNOWN_ROOMS', '10000'),
       roomSweepTimeoutMs: positiveInteger(environment, 'ROOM_SWEEP_TIMEOUT_MS', '100'),
-      livekitRequestTimeoutMs: positiveInteger(environment, 'LIVEKIT_REQUEST_TIMEOUT_MS', '1000'),
+      livekitRequestTimeoutMs: wholeSecondTimeout(environment),
       trustedProxyCidrs: parseTrustedProxyCidrs(environment.TRUSTED_PROXY_CIDRS),
       rateLimit: {
         max: positiveInteger(environment, 'RATE_LIMIT_MAX', '30'),

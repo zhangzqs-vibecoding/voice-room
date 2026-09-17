@@ -52,6 +52,14 @@ describe('server configuration', () => {
     expect(() => loadServerConfig({ ...environment, [name]: value })).toThrow(`${name} must be a positive integer`);
   });
 
+  it.each(['1', '999', '1001'])('rejects a LiveKit request timeout that is not a whole second', (value) => {
+    expect(() => loadServerConfig({ ...environment, LIVEKIT_REQUEST_TIMEOUT_MS: value })).toThrow('LIVEKIT_REQUEST_TIMEOUT_MS must be a positive multiple of 1000');
+  });
+
+  it.each(['1000', '2000'])('accepts a whole-second LiveKit request timeout', (value) => {
+    expect(loadServerConfig({ ...environment, LIVEKIT_REQUEST_TIMEOUT_MS: value }).apiConfig.livekitRequestTimeoutMs).toBe(Number(value));
+  });
+
   it('rejects a non-WebSocket LiveKit URL', () => {
     expect(() => loadServerConfig({ ...environment, LIVEKIT_URL: 'https://livekit.example.test' })).toThrow('LIVEKIT_URL must be a ws or wss URL');
   });
