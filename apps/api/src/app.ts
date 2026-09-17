@@ -11,8 +11,13 @@ export interface LiveKitGateway {
     roomName: string;
     metadata: string;
     grants: { roomJoin: true; canPublish: true; canSubscribe: true };
-    ttlSeconds: number;
+    maximumTtlSeconds: number;
+    expiresAtMs: number;
   }): Promise<string>;
+}
+
+export class RoomExpiredError extends Error {
+  readonly code = 'room_expired';
 }
 
 export interface ApiConfig {
@@ -113,13 +118,18 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         roomName: roomId,
         metadata,
         grants: { roomJoin: true, canPublish: true, canSubscribe: true },
-        ttlSeconds: Math.min(options.config.tokenTtlSeconds, remainingTtlSeconds)
+        maximumTtlSeconds: options.config.tokenTtlSeconds,
+        expiresAtMs: room.expiresAt
       });
       room.reservedParticipants -= 1;
       room.issuedParticipants += 1;
       return { participantId, livekitUrl: options.config.livekitUrl, token };
-    } catch {
+    } catch (error) {
       room.reservedParticipants -= 1;
+      if (isRoomExpiredError(error)) {
+        knownRooms.delete(roomId);
+        return reply.code(404).send({ error: 'room_not_found' });
+      }
       return reply.code(502).send({ error: 'token_service_unavailable' });
     }
   });
@@ -128,3 +138,6 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 };
 
 const clientAddress = (request: FastifyRequest): string => request.ip;
+
+const isRoomExpiredError = (error: unknown): error is RoomExpiredError =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'room_expired';

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createApp, type LiveKitGateway } from '../src/app.js';
 import { LiveKitServerGateway } from '../src/livekit-gateway.js';
 
@@ -15,6 +15,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
   createdTokens: Array<Record<string, unknown>> = [];
   shouldFailCreate = false;
   shouldFailToken = false;
+  shouldExpireToken = false;
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -23,6 +24,7 @@ class FakeLiveKitGateway implements LiveKitGateway {
 
   async createAccessToken(input: Record<string, unknown>) {
     if (this.shouldFailToken) throw new Error('LiveKit token signing unavailable');
+    if (this.shouldExpireToken) throw Object.assign(new Error('Room expired while signing'), { code: 'room_expired' });
     this.createdTokens.push(input);
     return JSON.stringify(input);
   }
@@ -42,6 +44,27 @@ const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
 };
 
 describe('voice room API', () => {
+  it('signs a JWT whose expiration never exceeds the absolute room expiry', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2030-01-01T00:00:00.500Z'));
+      const expiresAtMs = Date.now() + 1_500;
+      const livekit = new LiveKitServerGateway(config);
+      const token = await livekit.createAccessToken({
+        participantId: 'participant_123',
+        roomName: 'room_abcdefghijklmnopqrstuv',
+        metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
+        grants: { roomJoin: true, canPublish: true, canSubscribe: true },
+        maximumTtlSeconds: 900,
+        expiresAtMs
+      } as Parameters<typeof livekit.createAccessToken>[0]);
+      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+      expect(payload.exp * 1_000).toBeLessThanOrEqual(expiresAtMs);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('creates a LiveKit JWT that can join only the requested room', async () => {
     const livekit = new LiveKitServerGateway(config);
     const token = await livekit.createAccessToken({
@@ -49,7 +72,8 @@ describe('voice room API', () => {
       roomName: 'room_abcdefghijklmnopqrstuv',
       metadata: JSON.stringify({ nickname: 'Lee', avatarId: 'fox' }),
       grants: { roomJoin: true, canPublish: true, canSubscribe: true },
-      ttlSeconds: 900
+      maximumTtlSeconds: 900,
+      expiresAtMs: Date.now() + 900_000
     });
     const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
     expect(payload.sub).toBe('participant_123');
@@ -108,8 +132,8 @@ describe('voice room API', () => {
     expect(token.roomName).toBe('room_abcdefghijklmnopqrstuv');
     expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true });
     expect(token.metadata).toBe(JSON.stringify({ nickname: '小王', avatarId: 'fox' }));
-    expect(token.ttlSeconds).toBeGreaterThan(0);
-    expect(token.ttlSeconds).toBeLessThanOrEqual(300);
+    expect(token.maximumTtlSeconds).toBe(900);
+    expect(token.expiresAtMs).toBeGreaterThan(Date.now());
     expect(token.apiSecret).toBeUndefined();
     await app.close();
   });
@@ -172,8 +196,8 @@ describe('voice room API', () => {
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens).toHaveLength(1);
-    expect(livekit.createdTokens[0]?.ttlSeconds).toBe(1);
-    expect(currentTime + Number(livekit.createdTokens[0]?.ttlSeconds) * 1000).toBeLessThanOrEqual(300_000);
+    expect(livekit.createdTokens[0]?.maximumTtlSeconds).toBe(900);
+    expect(livekit.createdTokens[0]?.expiresAtMs).toBe(300_000);
     await app.close();
   });
 
@@ -229,6 +253,27 @@ describe('voice room API', () => {
       payload: { nickname: 'extra', avatarId: 'fox' }
     });
     expect(full.statusCode).toBe(409);
+    await app.close();
+  });
+
+  it('releases the reservation and removes the room when signing detects expiry', async () => {
+    const { app, livekit } = buildApp();
+    await app.inject({ method: 'POST', url: '/api/rooms' });
+    livekit.shouldExpireToken = true;
+    const expired = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(expired.statusCode).toBe(404);
+    livekit.shouldExpireToken = false;
+    const retry = await app.inject({
+      method: 'POST',
+      url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
+      payload: { nickname: 'Lee', avatarId: 'fox' }
+    });
+    expect(retry.statusCode).toBe(404);
+    expect(livekit.createdTokens).toHaveLength(0);
     await app.close();
   });
 
