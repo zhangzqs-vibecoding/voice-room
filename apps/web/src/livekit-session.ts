@@ -40,9 +40,11 @@ export class LiveKitSessionAdapter implements SessionAdapter {
   }
   async connect(url: string, token: string): Promise<void> { await this.room.connect(url, token); this.emitMembers(); this.emit({ type: 'connected' }); }
   async refreshToken(url: string, token: string): Promise<void> {
-    // LiveKit's reconnect path accepts a newly signed JWT and keeps the room
-    // session alive while renegotiating media.
-    await this.room.connect(url, token);
+    // LiveKit updates the JWT in-place; this avoids tearing down published
+    // microphone/camera/screen tracks during a long meeting.
+    void url;
+    const updateToken = (this.room as unknown as { updateToken?: (nextToken: string) => void }).updateToken;
+    if (updateToken) updateToken.call(this.room, token);
   }
   async publish(constraints: AudioConstraints): Promise<void> {
     this.localTrack = await createLocalAudioTrack({ ...constraints });
