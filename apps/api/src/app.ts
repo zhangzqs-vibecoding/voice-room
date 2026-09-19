@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import { compileTrustedProxy } from './trusted-proxy.js';
 
@@ -12,11 +12,14 @@ export interface LiveKitGateway {
     name: string;
     roomName: string;
     metadata: string;
-    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
+    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: boolean; canPublishSources: string[]; roomAdmin?: true };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string>;
   roomExists(roomName: string, signal?: AbortSignal): Promise<boolean>;
+  removeParticipant(roomName: string, participantId: string): Promise<void>;
+  mutePublishedTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void>;
+  deleteRoom(roomName: string): Promise<void>;
 }
 
 export class RoomExpiredError extends Error {
@@ -47,11 +50,16 @@ export interface CreateAppOptions {
 const ROOM_ID_PATTERN = /^room_[a-z0-9]{20,}$/;
 const MUTATING_METHODS = new Set(['POST']);
 const ROOM_LINK_LIFETIME_MS = 300_000;
-const MAX_PARTICIPANTS = 10;
+const DEFAULT_MAX_PARTICIPANTS = 10;
+const MAX_PARTICIPANTS = 50;
 
 interface RoomState {
   expiresAt: number;
   reservedParticipants: number;
+  maxParticipants: number;
+  hostSecret: string;
+  participantSecret: string;
+  locked: boolean;
 }
 
 interface RateLimitEntry {
@@ -78,6 +86,20 @@ const parseJoin = (body: unknown): { nickname: string; avatarId: AvatarId } | un
   const trimmed = nickname.trim();
   if (Array.from(trimmed).length < 1 || Array.from(trimmed).length > 32) return undefined;
   return { nickname: trimmed, avatarId };
+};
+
+const parseMaxParticipants = (body: unknown): number | undefined => {
+  if (!body || typeof body !== 'object') return DEFAULT_MAX_PARTICIPANTS;
+  const value = (body as Record<string, unknown>).maxParticipants;
+  if (value === undefined) return DEFAULT_MAX_PARTICIPANTS;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 2 && value <= MAX_PARTICIPANTS ? value : undefined;
+};
+
+const secretMatches = (actual: string | undefined, expected: string): boolean => {
+  if (!actual) return false;
+  const left = Buffer.from(actual);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
 };
 
 export const createApp = (options: CreateAppOptions): FastifyInstance => {
@@ -208,6 +230,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.post('/api/rooms', async (_request, reply) => {
+    const maxParticipants = parseMaxParticipants(_request.body);
+    if (maxParticipants === undefined) return reply.code(400).send({ error: 'invalid_max_participants' });
     const roomId = createRoomId();
     if (!ROOM_ID_PATTERN.test(roomId)) return reply.code(502).send({ error: 'room_service_unavailable' });
     if (knownRooms.size + pendingCreates >= options.config.roomCacheMaxEntries) {
@@ -216,9 +240,15 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     }
     pendingCreates += 1;
     try {
-      await withLiveKitDeadline((signal) => options.livekit.createRoom({ name: roomId, maxParticipants: MAX_PARTICIPANTS, emptyTimeout: 300, departureTimeout: 300 }, signal));
-      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0 });
-      return reply.code(201).send({ roomId });
+      await withLiveKitDeadline((signal) => options.livekit.createRoom({ name: roomId, maxParticipants, emptyTimeout: 300, departureTimeout: 300 }, signal));
+      const hostSecret = randomBytes(32).toString('base64url');
+      const participantSecret = randomBytes(32).toString('base64url');
+      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0, maxParticipants, hostSecret, participantSecret, locked: false });
+      return reply.code(201).send({
+        roomId,
+        hostUrl: `/meeting/${roomId}?hostToken=${encodeURIComponent(hostSecret)}`,
+        participantUrl: `/meeting/${roomId}?participantToken=${encodeURIComponent(participantSecret)}`
+      });
     } catch (error) {
       return reply.code(error instanceof LiveKitTimeoutError ? 503 : 502).send({ error: 'room_service_unavailable' });
     } finally {
@@ -237,9 +267,17 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
       if (refreshResult === 'unavailable') return reply.code(502).send({ error: 'room_service_unavailable' });
       if (refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
     }
+    const joinBody = request.body as Record<string, unknown> | undefined;
+    const hostToken = typeof joinBody?.hostToken === 'string' ? joinBody.hostToken : undefined;
+    const participantToken = typeof joinBody?.participantToken === 'string' ? joinBody.participantToken : undefined;
+    const isHost = secretMatches(hostToken, room.hostSecret);
+    if ((hostToken || participantToken) && !isHost && !secretMatches(participantToken, room.participantSecret)) {
+      return reply.code(403).send({ error: 'credential_invalid' });
+    }
+    if (room.locked && !isHost) return reply.code(409).send({ error: 'room_locked' });
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
-    if (room.reservedParticipants >= MAX_PARTICIPANTS) {
+    if (room.reservedParticipants >= room.maxParticipants) {
       return reply.code(409).send({ error: 'room_full' });
     }
 
@@ -261,7 +299,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
           name: identity.nickname,
           roomName: roomId,
           metadata,
-          grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] },
+          grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share'], ...(isHost ? { roomAdmin: true as const } : {}) },
           maximumTtlSeconds: options.config.tokenTtlSeconds,
           expiresAtMs: room.expiresAt
         });
@@ -282,6 +320,70 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     }
     room.reservedParticipants -= 1;
     return reply.code(502).send({ error: 'token_service_unavailable' });
+  });
+
+  const hostSecretFromRequest = (request: FastifyRequest): string | undefined => {
+    const body = request.body as Record<string, unknown> | undefined;
+    const header = request.headers['x-host-token'];
+    return typeof body?.hostToken === 'string' ? body.hostToken : typeof header === 'string' ? header : undefined;
+  };
+
+  const requireHost = (request: FastifyRequest, roomId: string, reply: { code: (status: number) => { send: (body: unknown) => unknown } }): RoomState | undefined => {
+    const room = knownRooms.get(roomId);
+    if (!room) {
+      void reply.code(404).send({ error: 'room_not_found' });
+      return undefined;
+    }
+    if (!secretMatches(hostSecretFromRequest(request), room.hostSecret)) {
+      void reply.code(403).send({ error: 'host_forbidden' });
+      return undefined;
+    }
+    return room;
+  };
+
+  app.post('/api/rooms/:roomId/lock', async (request, reply) => {
+    const { roomId } = request.params as { roomId: string };
+    const room = requireHost(request, roomId, reply);
+    if (!room) return;
+    const body = request.body as Record<string, unknown> | undefined;
+    room.locked = body?.locked !== false;
+    return reply.code(200).send({ locked: room.locked });
+  });
+
+  app.post('/api/rooms/:roomId/participants/:participantId/remove', async (request, reply) => {
+    const { roomId, participantId } = request.params as { roomId: string; participantId: string };
+    if (!requireHost(request, roomId, reply)) return;
+    try {
+      await options.livekit.removeParticipant(roomId, participantId);
+      return reply.code(204).send();
+    } catch {
+      return reply.code(502).send({ error: 'room_service_unavailable' });
+    }
+  });
+
+  app.post('/api/rooms/:roomId/participants/:participantId/mute', async (request, reply) => {
+    const { roomId, participantId } = request.params as { roomId: string; participantId: string };
+    if (!requireHost(request, roomId, reply)) return;
+    const body = request.body as Record<string, unknown> | undefined;
+    if (typeof body?.trackSid !== 'string' || typeof body.muted !== 'boolean') return reply.code(400).send({ error: 'invalid_request' });
+    try {
+      await options.livekit.mutePublishedTrack(roomId, participantId, body.trackSid, body.muted);
+      return reply.code(204).send();
+    } catch {
+      return reply.code(502).send({ error: 'room_service_unavailable' });
+    }
+  });
+
+  app.post('/api/rooms/:roomId/end', async (request, reply) => {
+    const { roomId } = request.params as { roomId: string };
+    if (!requireHost(request, roomId, reply)) return;
+    try {
+      await options.livekit.deleteRoom(roomId);
+      knownRooms.delete(roomId);
+      return reply.code(204).send();
+    } catch {
+      return reply.code(502).send({ error: 'room_service_unavailable' });
+    }
   });
 
   return app;
