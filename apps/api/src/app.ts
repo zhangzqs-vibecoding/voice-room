@@ -45,6 +45,8 @@ export interface CreateAppOptions {
   roomId?: () => string;
   participantId?: () => string;
   now?: () => number;
+  hostSecret?: () => string;
+  participantSecret?: () => string;
 }
 
 const ROOM_ID_PATTERN = /^room_[a-z0-9]{20,}$/;
@@ -110,6 +112,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
   let roomSweepCursor = 0;
   const createRoomId = options.roomId ?? defaultRoomId;
   const createParticipantId = options.participantId ?? defaultParticipantId;
+  const createHostSecret = options.hostSecret ?? (() => randomBytes(32).toString('base64url'));
+  const createParticipantSecret = options.participantSecret ?? (() => randomBytes(32).toString('base64url'));
   const now = options.now ?? Date.now;
 
   const withLiveKitDeadline = <T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
@@ -241,8 +245,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     pendingCreates += 1;
     try {
       await withLiveKitDeadline((signal) => options.livekit.createRoom({ name: roomId, maxParticipants, emptyTimeout: 300, departureTimeout: 300 }, signal));
-      const hostSecret = randomBytes(32).toString('base64url');
-      const participantSecret = randomBytes(32).toString('base64url');
+      const hostSecret = createHostSecret();
+      const participantSecret = createParticipantSecret();
       knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0, maxParticipants, hostSecret, participantSecret, locked: false });
       return reply.code(201).send({
         roomId,
@@ -271,7 +275,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     const hostToken = typeof joinBody?.hostToken === 'string' ? joinBody.hostToken : undefined;
     const participantToken = typeof joinBody?.participantToken === 'string' ? joinBody.participantToken : undefined;
     const isHost = secretMatches(hostToken, room.hostSecret);
-    if ((hostToken || participantToken) && !isHost && !secretMatches(participantToken, room.participantSecret)) {
+    if (!isHost && !secretMatches(participantToken, room.participantSecret)) {
       return reply.code(403).send({ error: 'credential_invalid' });
     }
     if (room.locked && !isHost) return reply.code(409).send({ error: 'room_locked' });
