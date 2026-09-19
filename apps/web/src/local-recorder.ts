@@ -84,6 +84,8 @@ export class LocalCompositeRecorder {
   private scheduleHandle?: number;
   private chunks: Blob[] = [];
   private stopPromise?: Promise<Blob | undefined>;
+  private recordingError?: LocalRecorderError;
+  private pendingStopReject?: (error: unknown) => void;
 
   public constructor(options: RecorderOptions, dependencies: RecorderDependencies = {}) {
     this.options = { width: 1280, height: 720, frameRate: 30, fileName: 'voice-room-meeting.webm', ...options };
@@ -95,6 +97,7 @@ export class LocalCompositeRecorder {
   public start(): void {
     if (this.mediaRecorder) throw new LocalRecorderError('录制已经开始');
     if (!this.mimeType || !this.deps.MediaRecorder) throw new LocalRecorderError('浏览器不支持本地录制');
+    this.recordingError = undefined;
 
     const context = this.options.canvas.getContext('2d');
     if (!context) throw new LocalRecorderError('无法创建录制画布');
@@ -102,29 +105,43 @@ export class LocalCompositeRecorder {
     this.options.canvas.height = this.options.height;
     drawTiles(context, this.options.canvas, this.options.tiles());
 
-    const videoStream = this.options.canvas.captureStream(this.options.frameRate);
-    this.recordingStream = videoStream;
-    const tracks = [...videoStream.getVideoTracks()];
-    this.setupAudio(tracks);
-    this.mediaRecorder = new this.deps.MediaRecorder(this.recordingStream, { mimeType: this.mimeType });
-    this.mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) this.chunks.push(event.data); };
-    this.mediaRecorder.start();
-    this.scheduleHandle = this.deps.schedule(() => this.drawFrame(), Math.max(1, 1000 / this.options.frameRate));
+    try {
+      const videoStream = this.options.canvas.captureStream(this.options.frameRate);
+      this.recordingStream = videoStream;
+      const tracks = [...videoStream.getVideoTracks()];
+      this.setupAudio(tracks);
+      this.mediaRecorder = new this.deps.MediaRecorder(this.recordingStream, { mimeType: this.mimeType });
+      this.mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) this.chunks.push(event.data); };
+      this.mediaRecorder.onerror = () => this.handleRecorderError();
+      this.mediaRecorder.start();
+      this.scheduleHandle = this.deps.schedule(() => this.drawFrame(), Math.max(1, 1000 / this.options.frameRate));
+    } catch (error) {
+      this.cleanup();
+      throw error;
+    }
   }
 
   public stop(): Promise<Blob | undefined> {
     if (this.stopPromise) return this.stopPromise;
+    if (this.recordingError) {
+      const error = this.recordingError;
+      this.recordingError = undefined;
+      return Promise.reject(error);
+    }
     if (!this.mediaRecorder) return Promise.resolve(undefined);
     this.stopPromise = new Promise<Blob | undefined>((resolve, reject) => {
       const recorder = this.mediaRecorder!;
+      this.pendingStopReject = reject;
       recorder.onstop = () => {
         const blob = this.chunks.length ? new Blob(this.chunks, { type: this.mimeType }) : undefined;
         try {
           if (blob) this.download(blob);
           this.cleanup();
+          this.pendingStopReject = undefined;
           resolve(blob);
         } catch (error) {
           this.cleanup();
+          this.pendingStopReject = undefined;
           reject(error);
         }
       };
@@ -132,6 +149,7 @@ export class LocalCompositeRecorder {
         recorder.stop();
       } catch (error) {
         this.cleanup();
+        this.pendingStopReject = undefined;
         reject(error);
       }
     });
@@ -154,15 +172,28 @@ export class LocalCompositeRecorder {
       this.recordingStream = this.deps.createMediaStream(videoTracks);
     } catch {
       // 不支持 Web Audio 混音时仍录制画面，保持会议通话不受影响。
+      this.closeAudioResources();
       this.recordingStream = this.deps.createMediaStream(videoTracks);
     }
   }
 
   private drawFrame(): void {
     if (!this.mediaRecorder) return;
-    const context = this.options.canvas.getContext('2d');
-    if (context) drawTiles(context, this.options.canvas, this.options.tiles());
+    try {
+      const context = this.options.canvas.getContext('2d');
+      if (context) drawTiles(context, this.options.canvas, this.options.tiles());
+    } catch {
+      // 布局在成员离开或 React 卸载的瞬间可能暂时不可读，继续下一帧。
+    }
     this.scheduleHandle = this.deps.schedule(() => this.drawFrame(), Math.max(1, 1000 / this.options.frameRate));
+  }
+
+  private handleRecorderError(): void {
+    const error = new LocalRecorderError('录制失败');
+    this.recordingError = error;
+    this.cleanup();
+    this.pendingStopReject?.(error);
+    this.pendingStopReject = undefined;
   }
 
   private download(blob: Blob): void {
@@ -183,12 +214,19 @@ export class LocalCompositeRecorder {
     ]);
     for (const track of tracks) track.stop();
     this.recordingStream = undefined;
-    const context = this.audioContext;
-    this.audioContext = undefined;
-    this.audioDestination = undefined;
-    if (context) void context.close();
+    this.closeAudioResources(false);
     this.mediaRecorder = undefined;
     this.chunks = [];
+    this.stopPromise = undefined;
+  }
+
+  private closeAudioResources(stopTracks = true): void {
+    const destination = this.audioDestination;
+    const context = this.audioContext;
+    this.audioDestination = undefined;
+    this.audioContext = undefined;
+    if (stopTracks) for (const track of destination?.stream.getTracks() ?? []) track.stop();
+    if (context) void context.close();
   }
 }
 

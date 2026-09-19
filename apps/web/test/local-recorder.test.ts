@@ -103,4 +103,57 @@ describe('LocalCompositeRecorder', () => {
     const h = createHarness('unsupported');
     expect(() => new LocalCompositeRecorder({ canvas: h.canvas, tiles: () => [] }, { ...h.deps, MediaRecorder: class { static isTypeSupported = () => false; } as unknown as typeof MediaRecorder }).start()).toThrow('浏览器不支持本地录制');
   });
+
+  it('停止后可以再次开始并完成第二次录制', async () => {
+    const h = createHarness();
+    const recorder = new LocalCompositeRecorder({ canvas: h.canvas, tiles: () => [] }, h.deps);
+    recorder.start();
+    await recorder.stop();
+    expect(() => recorder.start()).not.toThrow();
+    await expect(recorder.stop()).resolves.toBeInstanceOf(Blob);
+    expect(h.canvas.captureStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('Web Audio 初始化失败时关闭已创建的上下文并继续录制画面', async () => {
+    const h = createHarness();
+    const createAudioContext = vi.fn(() => ({
+      createMediaStreamDestination: vi.fn(() => { throw new Error('unsupported'); }),
+      close: h.close
+    } as unknown as AudioContext));
+    const recorder = new LocalCompositeRecorder({ canvas: h.canvas, tiles: () => [], audioTracks: [track('audio')] }, { ...h.deps, createAudioContext });
+    recorder.start();
+    expect(h.close).toHaveBeenCalledOnce();
+    await expect(recorder.stop()).resolves.toBeInstanceOf(Blob);
+  });
+
+  it('MediaRecorder 构造或启动失败时清理已经创建的媒体资源', () => {
+    const h = createHarness();
+    class FailingRecorder {
+      static isTypeSupported = () => true;
+      constructor() { throw new Error('encoder failed'); }
+    }
+    const recorder = new LocalCompositeRecorder({ canvas: h.canvas, tiles: () => [], audioTracks: [track('audio')] }, { ...h.deps, MediaRecorder: FailingRecorder as unknown as typeof MediaRecorder });
+    expect(() => recorder.start()).toThrow('encoder failed');
+    expect(h.canvasStream.getTracks()[0].stop).toHaveBeenCalledOnce();
+    expect(h.close).toHaveBeenCalledOnce();
+  });
+
+  it('编码器异步报错后 stop 返回失败且已释放资源', async () => {
+    const h = createHarness();
+    class ErrorRecorder {
+      static isTypeSupported = () => true;
+      static latest: ErrorRecorder | undefined;
+      ondataavailable: ((event: BlobEvent) => void) | null = null;
+      onstop: (() => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor() { ErrorRecorder.latest = this; }
+      start = vi.fn();
+      stop = vi.fn();
+    }
+    const recorder = new LocalCompositeRecorder({ canvas: h.canvas, tiles: () => [] }, { ...h.deps, MediaRecorder: ErrorRecorder as unknown as typeof MediaRecorder });
+    recorder.start();
+    ErrorRecorder.latest?.onerror?.(new Event('error'));
+    await expect(recorder.stop()).rejects.toThrow('录制失败');
+    expect(h.canvasStream.getTracks()[0].stop).toHaveBeenCalledOnce();
+  });
 });
