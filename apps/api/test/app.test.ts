@@ -794,6 +794,46 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('releases a participant lease when the participant leaves', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    const participantId = join.json().participantId;
+    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/leave`, payload: { participantToken } });
+    expect(leave.statusCode).toBe(204);
+    const rejoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(rejoin.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('reclaims an expired participant lease before checking room capacity', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    livekit.roomStillExists = true;
+    currentTime = 301_000;
+    const rejoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(rejoin.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('rejects leave with an invalid participant credential', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId } = created.json();
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/participant_123/leave`, payload: { participantToken: 'invalid' } });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'credential_invalid' });
+    await app.close();
+  });
+
   it.each([1, 51, 2.5, '20', null])('rejects invalid maxParticipants %j', async (maxParticipants) => {
     const { app, livekit } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants } });
