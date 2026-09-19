@@ -7,6 +7,7 @@ export interface VideoParticipant {
   track?: MediaStreamTrack;
   cameraEnabled: boolean;
   speaking: boolean;
+  handRaised?: boolean;
   host?: boolean;
   trackSid?: string;
   microphoneTrackSid?: string;
@@ -20,7 +21,8 @@ const VideoTile = ({ participant, featured }: { participant: VideoParticipant; f
     return () => { if (video.current) video.current.srcObject = null; };
   }, [participant.track]);
   return <article className={`video-tile${featured ? ' video-tile-featured' : ''}`} data-participant={participant.id} data-track-sid={participant.trackSid ?? ''} data-mic-track-sid={participant.microphoneTrackSid ?? ''} data-speaking={participant.speaking}>
-    {participant.track && participant.cameraEnabled ? <video ref={video} autoPlay playsInline muted={participant.id === 'self'} /> : <div className="video-avatar" aria-label={`${participant.name} 摄像头已关闭`}>{participant.avatar}</div>}
+    {participant.track && participant.cameraEnabled ? <video ref={video} autoPlay playsInline muted /> : <div className="video-avatar" aria-label={`${participant.name} 摄像头已关闭`}>{participant.avatar}</div>}
+    {participant.handRaised && <span className="hand-raised" aria-label={`${participant.name}正在举手`}>✋</span>}
     <div className="video-name"><span>{participant.speaking ? '● ' : ''}{participant.name}</span>{participant.host && <small>主持人</small>}</div>
   </article>;
 };
@@ -36,7 +38,7 @@ export const MeetingLayout = ({ participants, activeSpeakerIds = [], screenTrack
     return () => { if (screen.current) screen.current.srcObject = null; };
   }, [screenTrack]);
   return <section className="meeting-layout" aria-label="视频会议画面">
-    {screenTrack && <div className="screen-share"><video ref={screen} autoPlay playsInline /><span>正在共享屏幕</span></div>}
+    {screenTrack && <div className="screen-share"><video ref={screen} autoPlay playsInline muted /><span>正在共享屏幕</span></div>}
     {featured && <VideoTile participant={featured} featured />}
     <div className="video-thumbnails">{thumbnails.map((participant) => <VideoTile participant={participant} key={participant.id} />)}</div>
   </section>;

@@ -17,6 +17,12 @@ describe('入场控制台', () => {
     expect([...page.querySelectorAll('button')].some((button) => button.textContent === '仅收听进入')).toBe(true);
   });
 
+  it('首页列出摄像头设备供入会前选择', async () => {
+    host = document.createElement('div'); document.body.append(host);
+    await act(async () => { createRoot(host!).render(<App mediaDevices={{ enumerateDevices: vi.fn().mockResolvedValue([{ kind: 'audioinput', deviceId: 'mic', label: '麦克风' }, { kind: 'videoinput', deviceId: 'cam', label: '摄像头' }]) }} />); });
+    expect(host.querySelector('[aria-label="摄像头设备"]')).toBeTruthy();
+  });
+
   it('创建后显示可复制的完整邀请链接和成功反馈', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ roomId: 'room_invite' }), { status: 201 })));
     const page = await render();
