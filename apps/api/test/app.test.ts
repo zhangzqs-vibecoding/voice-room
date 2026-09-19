@@ -895,6 +895,18 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('preserves host grants when refreshing a host token', async () => {
+    const { app, livekit } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, hostUrl } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Host', avatarId: 'owl', hostToken } });
+    const refreshed = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${join.json().participantId}/refresh-token`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(refreshed.statusCode).toBe(200);
+    expect(livekit.createdTokens.at(-1)?.grants).toMatchObject({ roomAdmin: true });
+    await app.close();
+  });
+
   it.each([1, 51, 2.5, '20', null])('rejects invalid maxParticipants %j', async (maxParticipants) => {
     const { app, livekit } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants } });
