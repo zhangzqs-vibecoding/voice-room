@@ -29,7 +29,7 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
   const [inviteUrl, setInviteUrl] = useState('');
   const [listenOnly, setListenOnly] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [maxParticipants] = useState(10);
+  const [maxParticipants, setMaxParticipants] = useState(10);
   const [hostInviteUrl, setHostInviteUrl] = useState('');
   const [credentials, setCredentials] = useState<JoinResponse>();
   const refreshDevices = async () => {
@@ -40,6 +40,20 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
     } catch { setMessage('无法读取麦克风列表；可选择仅收听进入。'); }
   };
   useEffect(() => { void refreshDevices(); }, []);
+  useEffect(() => {
+    const container = document.querySelector<HTMLElement>('.roomline');
+    if (!container || container.querySelector('[data-room-capacity]')) return;
+    const label = document.createElement('label');
+    label.dataset.roomCapacity = 'true';
+    label.textContent = '会议人数上限';
+    const select = document.createElement('select');
+    select.setAttribute('aria-label', '会议人数上限');
+    for (let count = 2; count <= 50; count += 1) { const option = document.createElement('option'); option.value = String(count); option.textContent = `${count} 人`; select.append(option); }
+    select.value = String(maxParticipants);
+    select.addEventListener('change', () => setMaxParticipants(Number(select.value)));
+    label.append(select); container.append(label);
+    return () => label.remove();
+  }, [maxParticipants]);
   const persist = () => savePreferences({ nickname: validateNickname(nickname) ?? '', avatarId, deviceId, mode });
   const enter = async (nextListenOnly: boolean) => {
     const validName = validateNickname(nickname);
@@ -98,5 +112,22 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
     catch { recorder.current = undefined; setRecording(false); setControlError('浏览器不支持本地录制。'); }
     return () => { if (recorder.current) void recorder.current.stop().catch(() => undefined); };
   }, [recording]);
+  useEffect(() => {
+    if (!chatOpen) return;
+    const panel = document.querySelector<HTMLElement>('.chat-panel');
+    if (!panel) return;
+    panel.replaceChildren();
+    const messages = document.createElement('div');
+    messages.className = 'chat-messages';
+    for (const item of state.chatMessages ?? []) { const line = document.createElement('p'); line.textContent = `${item.name}：${item.text}`; messages.append(line); }
+    if (!messages.childElementCount) { const empty = document.createElement('p'); empty.textContent = '暂无消息'; messages.append(empty); }
+    const form = document.createElement('form'); form.className = 'chat-form';
+    const input = document.createElement('input'); input.placeholder = '输入消息'; input.setAttribute('aria-label', '聊天消息');
+    const send = document.createElement('button'); send.type = 'submit'; send.className = 'outline'; send.textContent = '发送';
+    form.append(input, send); form.addEventListener('submit', (event) => { event.preventDefault(); if (input.value.trim()) void session.current?.sendChat(input.value, nickname); input.value = ''; });
+    panel.append(messages, form);
+    if ((state.raisedHands ?? []).length) { const hands = document.createElement('p'); hands.className = 'raised-hands'; hands.textContent = `举手：${(state.raisedHands ?? []).join('、')}`; panel.append(hands); }
+  }, [chatOpen, state.chatMessages, state.raisedHands, nickname]);
+  useEffect(() => { if (session.current) void session.current.setHandRaised(handRaised).catch(() => undefined); }, [handRaised]);
   return <main className="console room"><header><p className="eyebrow">ROOM / {roomId}</p><h1>会议已接通</h1><p className="subtitle">{state.connection === 'reconnecting' ? '正在恢复连接…' : state.connection === 'disconnected' ? '连接已断开' : listenOnly ? '仅收听 · 已连接 RTC' : '720p 自适应视频 · RTC 已连接'}</p></header><MeetingLayout participants={participants} activeSpeakerIds={state.activeSpeakerIds} screenTrack={state.screenTracks.self ?? Object.values(state.screenTracks)[0]} />{!listenOnly && <div className="input-grid room-device"><label>麦克风设备<select aria-label="房内麦克风设备" value={deviceId} onChange={(event) => void changeDevice(event.target.value)}><option value="">自动选择</option>{devices.map((device) => <option value={device.deviceId} key={device.deviceId}>{device.label}</option>)}</select></label><button className="refresh" onClick={onRefreshDevices}>↻ 刷新设备</button></div>}{controlError && <p role="alert" className="notice">{controlError}</p>}<div className="meeting-extra"><button className="outline" aria-pressed={chatOpen} onClick={() => setChatOpen(!chatOpen)}>聊天</button><button className="outline" aria-pressed={handRaised} onClick={() => setHandRaised(!handRaised)}>{handRaised ? '放下手' : '举手'}</button></div>{chatOpen && <aside className="chat-panel" aria-label="文字聊天"><p>聊天功能已打开，消息通道将在加入会议后启用。</p></aside>}<MeetingControls muted={muted} cameraEnabled={state.localCameraEnabled} sharingScreen={state.localScreenSharing} recording={recording} handlers={{ onMute: () => void toggleMute(), onCamera: () => void toggleCamera(), onScreenShare: () => void toggleScreen(), onRecord: () => setRecording(!recording), onLeave: () => void leave() }} disabled={state.connection !== 'connected'} />{state.connection === 'disconnected' && onReconnect && <button className="primary" onClick={onReconnect}>重新入场</button>}</main>;
 };
