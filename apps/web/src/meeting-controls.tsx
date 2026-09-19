@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 export interface MeetingControlHandlers {
   onMute: () => void;
   onCamera: () => void;
@@ -10,7 +12,7 @@ export const MeetingControls = ({ muted, cameraEnabled, sharingScreen, recording
   const isHost = typeof location !== 'undefined' && new URLSearchParams(location.search).has('hostToken');
   const [hostError, setHostError] = useState('');
   const [targetId, setTargetId] = useState('');
-  const targets = useMemo(() => typeof document === 'undefined' ? [] : [...document.querySelectorAll<HTMLElement>('.video-tile[data-participant]:not([data-participant="self"])')].map((element) => ({ id: element.dataset.participant ?? '', label: element.textContent?.trim() || element.dataset.participant || '', trackSid: element.dataset.trackSid ?? '' })).filter((target) => target.id), []);
+  const targets = typeof document === 'undefined' ? [] : [...document.querySelectorAll<HTMLElement>('.video-tile[data-participant]:not([data-participant="self"])')].map((element) => ({ id: element.dataset.participant ?? '', label: element.textContent?.trim() || element.dataset.participant || '', trackSid: element.dataset.trackSid ?? '' })).filter((target) => target.id);
   const hostAction = async (action: 'mute' | 'camera' | 'remove' | 'lock' | 'end') => {
     const room = location.pathname.match(/^\/meeting\/([^/]+)/)?.[1]; if (!room) return;
     const target = document.querySelector<HTMLElement>(`.video-tile[data-participant="${targetId || (targets[0]?.id ?? '')}"]`);
@@ -32,4 +34,3 @@ export const MeetingControls = ({ muted, cameraEnabled, sharingScreen, recording
   {isHost && <div className="host-controls" aria-label="主持人控制"><span>主持人</span><select aria-label="主持人目标成员" value={targetId} onChange={(event) => setTargetId(event.target.value)}><option value="">选择成员</option>{targets.map((target) => <option value={target.id} key={target.id}>{target.label}</option>)}</select><button className="outline" onClick={() => void hostAction('mute')}>静音成员</button><button className="outline" onClick={() => void hostAction('camera')}>关闭成员摄像头</button><button className="outline" onClick={() => void hostAction('remove')}>移除成员</button><button className="outline" onClick={() => void hostAction('lock')}>锁定会议</button><button className="danger" onClick={() => void hostAction('end')}>结束会议</button>{hostError && <small role="alert">{hostError}</small>}</div>}
 </nav>;
 };
-import { useMemo, useState } from 'react';
