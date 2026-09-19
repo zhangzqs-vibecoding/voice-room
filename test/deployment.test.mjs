@@ -57,3 +57,56 @@ test('GHCR 发布工作流仅在 main 与版本标签推送镜像', async () => 
   assert.match(workflow, /publish:\n\s+if: github\.event_name == 'push'\n\s+permissions:\n\s+contents: read\n\s+packages: write/);
   assert.match(workflow, /push: true/);
 });
+
+test('生产编排以公开镜像、TLS 分流与受限网络暴露部署 LiveKit', async () => {
+  const [compose, envExample, livekit, caddy, dockerfile] = await Promise.all([
+    text('deploy/production/docker-compose.yml'),
+    text('deploy/production/.env.example'),
+    text('deploy/production/livekit.yaml'),
+    text('deploy/production/Caddyfile'),
+    text('deploy/production/Dockerfile.edge'),
+  ]);
+
+  for (const value of [
+    'ghcr.io/zhangzqs-vibecoding/voice-room-api:${VOICE_ROOM_IMAGE_TAG:?',
+    'ghcr.io/zhangzqs-vibecoding/voice-room-web:${VOICE_ROOM_IMAGE_TAG:?',
+    'redis:7.4-alpine',
+    '443:443/tcp',
+    '443:443/udp',
+    '3478:3478/udp',
+    '7881:7881/tcp',
+    '50000-50100:50000-50100/udp',
+    'LIVEKIT_PUBLIC_URL: wss://livekit.vps-jp.zhangzqs.cn',
+    'TRUSTED_PROXY_CIDRS: 172.29.0.0/24',
+  ]) {
+    assert.match(compose, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.doesNotMatch(compose, /3000:3000|7880:7880|6379:6379/);
+  for (const value of [
+    'use_external_ip: true',
+    'tcp_port: 7881',
+    'port_range_start: 50000',
+    'port_range_end: 50100',
+    'enabled: true',
+    'udp_port: 443',
+    'tls_port: 443',
+    'external_tls: true',
+  ]) {
+    assert.match(livekit, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  for (const domain of ['vps-jp.zhangzqs.cn', 'livekit.vps-jp.zhangzqs.cn', 'turn.vps-jp.zhangzqs.cn']) {
+    assert.match(caddy, new RegExp(domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.match(caddy, /proxy livekit:443/);
+  assert.match(dockerfile, /github\.com\/mholt\/caddy-l4/);
+  assert.match(envExample, /^VOICE_ROOM_IMAGE_TAG=sha-[a-f0-9]{40}$/m);
+});
+
+test('生产文档说明 50 人视频会议、主持链接和浏览器本地录制', async () => {
+  const [readme, deployReadme] = await Promise.all([text('README.md'), text('deploy/README.md')]);
+  for (const document of [readme, deployReadme]) {
+    for (const phrase of ['50 人', '720p', '主持人链接', '参会链接', '屏幕共享', '本地录制']) {
+      assert.match(document, new RegExp(phrase));
+    }
+  }
+});
