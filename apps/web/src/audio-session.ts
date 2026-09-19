@@ -1,14 +1,16 @@
 import type { AudioMode } from './domain.js';
 
 export type AudioConstraints = MediaTrackConstraints;
+export type VideoConstraints = MediaTrackConstraints;
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 export interface RemoteMember { id: string; name: string; avatarId: string }
 export interface SessionEvent {
-  type: 'connected' | 'reconnecting' | 'reconnected' | 'disconnected' | 'active-speakers' | 'local-level' | 'participants';
+  type: 'connected' | 'reconnecting' | 'reconnected' | 'disconnected' | 'active-speakers' | 'local-level' | 'participants' | 'video-track' | 'screen-track' | 'screen-share';
   participantIds?: string[];
   reason?: string;
   speaking?: boolean;
   members?: RemoteMember[];
+  track?: MediaStreamTrack;
 }
 export interface SessionAdapter {
   connect(url: string, token: string): Promise<void>;
@@ -17,8 +19,12 @@ export interface SessionAdapter {
   switchDevice(constraints: AudioConstraints): Promise<void>;
   disconnect(): Promise<void>;
   onEvent(listener: (event: SessionEvent) => void): () => void;
+  publishVideo?: (constraints: VideoConstraints) => Promise<void>;
+  setCameraEnabled?: (enabled: boolean) => Promise<void>;
+  startScreenShare?: () => Promise<void>;
+  stopScreenShare?: () => Promise<void>;
 }
-export interface SessionState { connection: ConnectionState; activeSpeakerIds: string[]; localSpeaking: boolean; members: RemoteMember[]; disconnectReason?: string }
+export interface SessionState { connection: ConnectionState; activeSpeakerIds: string[]; localSpeaking: boolean; members: RemoteMember[]; videoTracks: Record<string, MediaStreamTrack>; screenTracks: Record<string, MediaStreamTrack>; localCameraEnabled: boolean; localScreenSharing: boolean; disconnectReason?: string }
 export interface EnterOptions { livekitUrl: string; token: string; listenOnly: boolean; mode: AudioMode; deviceId: string }
 
 export const voiceConstraints = (deviceId: string): AudioConstraints => ({
@@ -29,10 +35,14 @@ export const instrumentConstraints = (deviceId: string): AudioConstraints => ({
   ...(deviceId ? { deviceId: { exact: deviceId } } : {}), channelCount: 2, sampleRate: 48_000,
   echoCancellation: false, noiseSuppression: false, autoGainControl: false
 });
+export const cameraConstraints = (deviceId: string): VideoConstraints => ({
+  ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+  width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: 'user'
+});
 const constraintsFor = (mode: AudioMode, deviceId: string) => mode === 'instrument' ? instrumentConstraints(deviceId) : voiceConstraints(deviceId);
 
 export class AudioSession {
-  private state: SessionState = { connection: 'disconnected', activeSpeakerIds: [], localSpeaking: false, members: [] };
+  private state: SessionState = { connection: 'disconnected', activeSpeakerIds: [], localSpeaking: false, members: [], videoTracks: {}, screenTracks: {}, localCameraEnabled: false, localScreenSharing: false };
   private muted = false;
   private listening = true;
   private stopEvents?: () => void;
@@ -41,7 +51,7 @@ export class AudioSession {
 
   async enter(options: EnterOptions): Promise<void> {
     this.listening = options.listenOnly;
-    this.update({ connection: 'connecting', activeSpeakerIds: [], localSpeaking: false, members: [], disconnectReason: undefined });
+    this.update({ connection: 'connecting', activeSpeakerIds: [], localSpeaking: false, members: [], videoTracks: {}, screenTracks: {}, localCameraEnabled: false, localScreenSharing: false, disconnectReason: undefined });
     this.stopEvents = this.adapter.onEvent((event) => this.handle(event));
     try {
       await this.adapter.connect(options.livekitUrl, options.token);
@@ -60,6 +70,26 @@ export class AudioSession {
     await this.adapter.switchDevice(constraintsFor(mode, deviceId));
     await this.adapter.setMuted(this.muted);
   }
+  async startCamera(deviceId = ''): Promise<void> {
+    if (!this.adapter.publishVideo) throw new Error('video_not_supported');
+    await this.adapter.publishVideo(cameraConstraints(deviceId));
+    this.update({ localCameraEnabled: true });
+  }
+  async setCameraEnabled(enabled: boolean): Promise<void> {
+    if (!this.adapter.setCameraEnabled) throw new Error('video_not_supported');
+    await this.adapter.setCameraEnabled(enabled);
+    this.update({ localCameraEnabled: enabled });
+  }
+  async startScreenShare(): Promise<void> {
+    if (!this.adapter.startScreenShare) throw new Error('screen_share_not_supported');
+    await this.adapter.startScreenShare();
+    this.update({ localScreenSharing: true });
+  }
+  async stopScreenShare(): Promise<void> {
+    if (!this.adapter.stopScreenShare) throw new Error('screen_share_not_supported');
+    await this.adapter.stopScreenShare();
+    this.update({ localScreenSharing: false });
+  }
   async leave(): Promise<void> {
     if (this.leaving) return this.leaving;
     this.leaving = this.leaveOnce();
@@ -74,6 +104,9 @@ export class AudioSession {
     if (event.type === 'active-speakers') this.update({ activeSpeakerIds: event.participantIds ?? [] });
     if (event.type === 'local-level') this.update({ localSpeaking: Boolean(event.speaking) });
     if (event.type === 'participants') this.update({ members: event.members ?? [] });
+    if (event.type === 'video-track' && event.participantIds?.[0] && event.track) this.update({ videoTracks: { ...this.state.videoTracks, [event.participantIds[0]]: event.track } });
+    if (event.type === 'screen-track' && event.participantIds?.[0] && event.track) this.update({ screenTracks: { ...this.state.screenTracks, [event.participantIds[0]]: event.track } });
+    if (event.type === 'screen-share') this.update({ localScreenSharing: Boolean(event.speaking) });
     if (event.type === 'reconnecting') this.update({ connection: 'reconnecting', disconnectReason: undefined });
     if (event.type === 'reconnected' || event.type === 'connected') this.update({ connection: 'connected', disconnectReason: undefined });
     if (event.type === 'disconnected') this.update({ connection: 'disconnected', disconnectReason: event.reason ?? 'disconnected' });

@@ -27,6 +27,29 @@ describe('音频采集参数', () => {
 });
 
 describe('AudioSession', () => {
+  it('进入会议后可发布 720p 摄像头并控制屏幕共享', async () => {
+    const fake = adapter();
+    const publishVideo = vi.fn();
+    const startScreenShare = vi.fn();
+    const stopScreenShare = vi.fn();
+    Object.assign(fake, { publishVideo, startScreenShare, stopScreenShare });
+    const session = new AudioSession(fake);
+    await session.enter({ livekitUrl: 'wss://rtc', token: 'token', listenOnly: true, mode: 'voice', deviceId: '' });
+    await session.startCamera('cam-1');
+    await session.startScreenShare();
+    await session.stopScreenShare();
+    expect(publishVideo).toHaveBeenCalledWith(expect.objectContaining({ deviceId: { exact: 'cam-1' }, width: { ideal: 1280 }, height: { ideal: 720 } }));
+    expect(startScreenShare).toHaveBeenCalledOnce();
+    expect(stopScreenShare).toHaveBeenCalledOnce();
+  });
+
+  it('摄像头或屏幕共享接口缺失时返回明确错误', async () => {
+    const session = new AudioSession(adapter());
+    await session.enter({ livekitUrl: 'wss://rtc', token: 'token', listenOnly: true, mode: 'voice', deviceId: '' });
+    await expect(session.startCamera('')).rejects.toThrow('video_not_supported');
+    await expect(session.startScreenShare()).rejects.toThrow('screen_share_not_supported');
+  });
+
   it('仅收听连接但绝不采集或发布本地音轨', async () => {
     const fake = adapter();
     const session = new AudioSession(fake);
