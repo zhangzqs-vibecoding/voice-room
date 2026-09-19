@@ -14,6 +14,7 @@ export class LiveKitSessionAdapter implements SessionAdapter {
   private listener?: (event: SessionEvent) => void;
   private attached = new Set<HTMLAudioElement>();
   private readonly trackElements = new Map<RemoteTrack, HTMLAudioElement>();
+  private readonly videoTracks = new Map<RemoteTrack, { source: Track.Source; participantId: string }>();
   private analyser?: AnalyserNode;
   private analyserTimer?: number;
   private context?: AudioContext;
@@ -24,9 +25,18 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     this.room.on(RoomEvent.Disconnected, (reason) => this.emit({ type: 'disconnected', reason: String(reason ?? 'disconnected') }));
     this.room.on(RoomEvent.ActiveSpeakersChanged, (participants) => this.emit({ type: 'active-speakers', participantIds: participants.map((participant) => participant.identity) }));
     this.room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => this.attachRemoteTrack(track, publication.source, participant.identity));
-    this.room.on(RoomEvent.TrackUnsubscribed, (track) => this.detachRemoteAudio(track));
+    this.room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => { this.detachRemoteTrack(track, publication.source, participant.identity); });
     this.room.on(RoomEvent.ParticipantConnected, () => this.emitMembers());
-    this.room.on(RoomEvent.ParticipantDisconnected, () => this.emitMembers());
+    this.room.on(RoomEvent.ParticipantDisconnected, (participant) => { for (const [track, info] of this.videoTracks) if (info.participantId === participant.identity) { this.videoTracks.delete(track); this.emit({ type: 'track-removed', participantIds: [participant.identity], source: info.source === Track.Source.ScreenShare ? 'screen' : 'camera' }); } this.emitMembers(); });
+    this.room.on(RoomEvent.TrackMuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: false }); });
+    this.room.on(RoomEvent.TrackUnmuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: true }); });
+    this.room.on(RoomEvent.DataReceived, (payload, participant) => {
+      try {
+        const event = JSON.parse(new TextDecoder().decode(payload)) as { type?: string; id?: string; name?: string; text?: string; raised?: boolean };
+        if (event.type === 'chat' && event.id && event.name && event.text) this.emit({ type: 'chat', message: { id: event.id, name: event.name, text: event.text } });
+        if (event.type === 'hand' && participant) this.emit({ type: 'hand', participantIds: [participant.identity], handRaised: Boolean(event.raised) });
+      } catch { /* ignore malformed data packets */ }
+    });
   }
   async connect(url: string, token: string): Promise<void> { await this.room.connect(url, token); this.emitMembers(); this.emit({ type: 'connected' }); }
   async publish(constraints: AudioConstraints): Promise<void> {
@@ -50,7 +60,7 @@ export class LiveKitSessionAdapter implements SessionAdapter {
   async publishVideo(constraints: VideoConstraints): Promise<void> {
     if (this.localVideoTrack) await this.room.localParticipant.unpublishTrack(this.localVideoTrack, true);
     this.localVideoTrack = await createLocalVideoTrack(constraints as Parameters<typeof createLocalVideoTrack>[0]);
-    await this.room.localParticipant.publishTrack(this.localVideoTrack, { source: Track.Source.Camera, simulcast: true, videoSimulcastLayers: [VideoPresets.h360, VideoPresets.h180], degradationPreference: 'maintain-framerate' });
+    await this.room.localParticipant.publishTrack(this.localVideoTrack, { source: Track.Source.Camera, simulcast: true, videoSimulcastLayers: [VideoPresets.h720, VideoPresets.h360, VideoPresets.h180], degradationPreference: 'maintain-framerate' });
     this.emit({ type: 'video-track', participantIds: ['self'], track: this.localVideoTrack.mediaStreamTrack });
   }
   async setCameraEnabled(enabled: boolean): Promise<void> {
@@ -74,8 +84,10 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     this.localScreenTrack = undefined;
     await this.room.localParticipant.unpublishTrack(track, true);
     track.stop();
+    this.emit({ type: 'track-removed', participantIds: ['self'], source: 'screen' });
     this.emit({ type: 'screen-share', speaking: false });
   }
+  async sendData(payload: Uint8Array): Promise<void> { await this.room.localParticipant.publishData(payload as Uint8Array<ArrayBuffer>, { reliable: true }); }
   onEvent(listener: (event: SessionEvent) => void): () => void { this.listener = listener; return () => { if (this.listener === listener) this.listener = undefined; }; }
   async disconnect(): Promise<void> {
     this.stopLevelMeter();
@@ -88,11 +100,21 @@ export class LiveKitSessionAdapter implements SessionAdapter {
   private attachRemoteTrack(track: RemoteTrack, source: Track.Source, participantId: string): void {
     if (track.kind !== Track.Kind.Audio && track.kind !== Track.Kind.Video) return;
     if (track.kind === Track.Kind.Video) {
+      this.videoTracks.set(track, { source, participantId });
       this.emit({ type: source === Track.Source.ScreenShare ? 'screen-track' : 'video-track', participantIds: [participantId], track: track.mediaStreamTrack });
       return;
     }
     const element = track.attach(); element.autoplay = true; element.setAttribute('playsinline', ''); element.dataset.livekitAudio = 'true';
     document.body.append(element); this.attached.add(element); this.trackElements.set(track, element);
+  }
+  private detachRemoteTrack(track: RemoteTrack, source: Track.Source, participantId: string): void {
+    if (track.kind === Track.Kind.Video) {
+      this.videoTracks.delete(track);
+      this.emit({ type: 'track-removed', participantIds: [participantId], source: source === Track.Source.ScreenShare ? 'screen' : 'camera' });
+      track.detach();
+      return;
+    }
+    this.detachRemoteAudio(track);
   }
   private detachRemoteAudio(track: RemoteTrack): void {
     const element = this.trackElements.get(track);

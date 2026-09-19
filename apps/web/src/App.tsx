@@ -4,14 +4,17 @@ import { AudioSession, type SessionAdapter, type SessionState } from './audio-se
 import { LiveKitSessionAdapter } from './livekit-session.js';
 import { MeetingControls } from './meeting-controls.js';
 import { MeetingLayout, type VideoParticipant } from './meeting-layout.js';
+import { LocalCompositeRecorder } from './local-recorder.js';
 import { AVATARS, type AudioMode, type AvatarId, loadPreferences, savePreferences, validateNickname } from './domain.js';
 
 type MediaDevicesLike = Pick<MediaDevices, 'enumerateDevices'>;
 interface Member { id: string; name: string; avatarId: AvatarId; speaking: boolean }
 interface Props { mediaDevices?: MediaDevicesLike; members?: Member[]; sessionFactory?: () => SessionAdapter }
 interface Device { deviceId: string; label: string }
-const roomIdFromPath = () => new URLSearchParams(location.search).get('room') ?? '';
-const errorText: Record<string, string> = { room_not_found: '这间房已失效或不存在。', room_full: '房间已满（最多 10 人）。', room_service_unavailable: '房间服务暂时不可用，请稍后再试。', network_error: '网络连接失败，请检查后重试。' };
+const meetingPath = () => { const match = location.pathname.match(/^\/meeting\/([^/]+)/); return match ? decodeURIComponent(match[1]) : ''; };
+const roomIdFromPath = () => meetingPath() || (new URLSearchParams(location.search).get('room') ?? '');
+const tokenFromPath = (name: 'hostToken' | 'participantToken') => new URLSearchParams(location.search).get(name) ?? undefined;
+const errorText: Record<string, string> = { room_not_found: '这间房已失效或不存在。', room_full: '房间已满。', room_service_unavailable: '房间服务暂时不可用，请稍后再试。', network_error: '网络连接失败，请检查后重试。' };
 
 export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessionFactory = () => new LiveKitSessionAdapter() }: Props) => {
   const defaults = useMemo(loadPreferences, []);
@@ -26,6 +29,8 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
   const [inviteUrl, setInviteUrl] = useState('');
   const [listenOnly, setListenOnly] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [maxParticipants] = useState(10);
+  const [hostInviteUrl, setHostInviteUrl] = useState('');
   const [credentials, setCredentials] = useState<JoinResponse>();
   const refreshDevices = async () => {
     if (!mediaDevices?.enumerateDevices) { setMessage('此浏览器无法选择麦克风设备。'); return; }
@@ -41,19 +46,19 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
     if (!validName) { setMessage('请输入 1–32 个字符的昵称。'); return; }
     if (!roomId) { setMessage('请先创建房间或打开邀请链接。'); return; }
     persist(); setBusy(true); setMessage('');
-    try { const nextCredentials = await joinRoom(roomId, { nickname: validName, avatarId }); setCredentials(nextCredentials); setListenOnly(nextListenOnly); setScreen('room'); }
+    try { const nextCredentials = await joinRoom(roomId, { nickname: validName, avatarId, hostToken: tokenFromPath('hostToken'), participantToken: tokenFromPath('participantToken') }); setCredentials(nextCredentials); setListenOnly(nextListenOnly); setScreen('room'); }
     catch (reason) { setMessage(errorText[reason instanceof Error ? reason.message : ''] ?? '加入失败，请稍后重试。'); }
     finally { setBusy(false); }
   };
   const makeRoom = async () => {
     setBusy(true); setMessage('');
-    try { const id = await createRoom(); const url = new URL(`?room=${encodeURIComponent(id)}`, location.href).toString(); setRoomId(id); setInviteUrl(url); history.replaceState(null, '', `?room=${encodeURIComponent(id)}`); setMessage('邀请链接已生成，复制后发送给朋友。'); }
+    try { const room = await createRoom(maxParticipants); const url = room.participantUrl || new URL(`?room=${encodeURIComponent(room.roomId)}`, location.href).toString(); setRoomId(room.roomId); setInviteUrl(url); setHostInviteUrl(room.hostUrl || url); history.replaceState(null, '', new URL(url).pathname + new URL(url).search); setMessage('邀请链接已生成，复制后发送给朋友。'); }
     catch { setMessage('创建房间失败，请稍后重试。'); } finally { setBusy(false); }
   };
   const copyInvite = async () => {
     const writeText = navigator.clipboard?.writeText;
     if (!writeText) { setMessage('请手动复制邀请链接。'); return; }
-    try { await writeText.call(navigator.clipboard, inviteUrl); setMessage('邀请链接已复制。'); }
+    try { await writeText.call(navigator.clipboard, inviteUrl); setMessage(hostInviteUrl ? '邀请链接已复制。主持人链接已保留在创建者页面。' : '邀请链接已复制。'); }
     catch { setMessage('请手动复制邀请链接。'); }
   };
   if (screen === 'room' && credentials) return <Room roomId={roomId} nickname={validateNickname(nickname) ?? '我'} avatarId={avatarId} listenOnly={listenOnly} members={members} deviceId={deviceId} devices={devices} mode={mode} credentials={credentials} sessionFactory={sessionFactory} onDeviceChange={setDeviceId} onRefreshDevices={() => void refreshDevices()} onReconnect={() => void enter(listenOnly)} onLeave={() => { setMessage(''); setScreen('lobby'); }} />;
@@ -65,6 +70,7 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   const [chatOpen, setChatOpen] = useState(false);
   const [handRaised, setHandRaised] = useState(false);
   const [recording, setRecording] = useState(false);
+  const recorder = useRef<LocalCompositeRecorder | undefined>(undefined);
   const [controlError, setControlError] = useState('');
   const [state, setState] = useState<SessionState>({ connection: credentials ? 'connecting' : 'connected', activeSpeakerIds: [], localSpeaking: false, members: [], videoTracks: {}, screenTracks: {}, localCameraEnabled: false, localScreenSharing: false });
   const session = useRef<AudioSession | undefined>(undefined);
@@ -84,5 +90,13 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   const participants: VideoParticipant[] = [{ id: 'self', name: self.name, avatar: AVATARS.find((item) => item.id === avatarId)?.icon ?? '🦊', track: state.videoTracks.self, cameraEnabled: state.localCameraEnabled, speaking: !muted && state.localSpeaking }, ...visibleMembers.map((member) => ({ id: member.id, name: member.name, avatar: AVATARS.find((item) => item.id === member.avatarId)?.icon ?? '🦊', track: state.videoTracks[member.id], cameraEnabled: Boolean(state.videoTracks[member.id]), speaking: member.speaking }))];
   const toggleCamera = async () => { try { await session.current?.setCameraEnabled(!state.localCameraEnabled); setControlError(''); } catch { setControlError('摄像头不可用，请检查浏览器权限。'); } };
   const toggleScreen = async () => { try { if (state.localScreenSharing) await session.current?.stopScreenShare(); else await session.current?.startScreenShare(); setControlError(''); } catch { setControlError('屏幕共享不可用或已被取消。'); } };
+  useEffect(() => {
+    if (!recording) { if (recorder.current) void recorder.current.stop().catch(() => undefined); recorder.current = undefined; return; }
+    const canvas = document.createElement('canvas');
+    const tiles = () => [...document.querySelectorAll<HTMLVideoElement>('.video-tile video')].map((element, index) => ({ element, x: index === 0 ? 0 : (index % 2) * 320, y: index === 0 ? 0 : Math.floor(index / 2) * 180, width: index === 0 ? 1280 : 320, height: index === 0 ? 720 : 180 }));
+    try { recorder.current = new LocalCompositeRecorder({ canvas, tiles, audioTracks: [...document.querySelectorAll<HTMLAudioElement>('[data-livekit-audio="true"]')].map((element) => element.srcObject instanceof MediaStream ? element.srcObject.getAudioTracks()[0] : undefined).filter((track): track is MediaStreamTrack => Boolean(track)) }); recorder.current.start(); setControlError(''); }
+    catch { recorder.current = undefined; setRecording(false); setControlError('浏览器不支持本地录制。'); }
+    return () => { if (recorder.current) void recorder.current.stop().catch(() => undefined); };
+  }, [recording]);
   return <main className="console room"><header><p className="eyebrow">ROOM / {roomId}</p><h1>会议已接通</h1><p className="subtitle">{state.connection === 'reconnecting' ? '正在恢复连接…' : state.connection === 'disconnected' ? '连接已断开' : listenOnly ? '仅收听 · 已连接 RTC' : '720p 自适应视频 · RTC 已连接'}</p></header><MeetingLayout participants={participants} activeSpeakerIds={state.activeSpeakerIds} screenTrack={state.screenTracks.self ?? Object.values(state.screenTracks)[0]} />{!listenOnly && <div className="input-grid room-device"><label>麦克风设备<select aria-label="房内麦克风设备" value={deviceId} onChange={(event) => void changeDevice(event.target.value)}><option value="">自动选择</option>{devices.map((device) => <option value={device.deviceId} key={device.deviceId}>{device.label}</option>)}</select></label><button className="refresh" onClick={onRefreshDevices}>↻ 刷新设备</button></div>}{controlError && <p role="alert" className="notice">{controlError}</p>}<div className="meeting-extra"><button className="outline" aria-pressed={chatOpen} onClick={() => setChatOpen(!chatOpen)}>聊天</button><button className="outline" aria-pressed={handRaised} onClick={() => setHandRaised(!handRaised)}>{handRaised ? '放下手' : '举手'}</button></div>{chatOpen && <aside className="chat-panel" aria-label="文字聊天"><p>聊天功能已打开，消息通道将在加入会议后启用。</p></aside>}<MeetingControls muted={muted} cameraEnabled={state.localCameraEnabled} sharingScreen={state.localScreenSharing} recording={recording} handlers={{ onMute: () => void toggleMute(), onCamera: () => void toggleCamera(), onScreenShare: () => void toggleScreen(), onRecord: () => setRecording(!recording), onLeave: () => void leave() }} disabled={state.connection !== 'connected'} />{state.connection === 'disconnected' && onReconnect && <button className="primary" onClick={onReconnect}>重新入场</button>}</main>;
 };
