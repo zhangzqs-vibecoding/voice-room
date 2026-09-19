@@ -103,6 +103,22 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
     void next.enter({ ...credentials, listenOnly, mode, deviceId }).then(() => listenOnly ? undefined : next.startCamera()).catch((error) => setControlError(error instanceof Error && error.message === 'video_not_supported' ? '摄像头不可用，请检查浏览器权限。' : '会议连接失败，请重试。'));
     return () => { void next.leave().catch(() => undefined); };
   }, [credentials?.livekitUrl, credentials?.participantId, credentials?.token]);
+  useEffect(() => {
+    if (listenOnly || !navigator.mediaDevices?.enumerateDevices) return;
+    const roomDevice = document.querySelector<HTMLElement>('.room-device');
+    if (!roomDevice || roomDevice.querySelector('[data-camera-device]')) return;
+    let select: HTMLSelectElement | undefined;
+    void navigator.mediaDevices.enumerateDevices().then((all) => {
+      const cameras = all.filter((device) => device.kind === 'videoinput');
+      if (!cameras.length) return;
+      const label = document.createElement('label'); label.dataset.cameraDevice = 'true'; label.textContent = '摄像头设备';
+      select = document.createElement('select'); select.setAttribute('aria-label', '摄像头设备');
+      for (const [index, camera] of cameras.entries()) { const option = document.createElement('option'); option.value = camera.deviceId; option.textContent = camera.label || `摄像头 ${index + 1}`; select.append(option); }
+      select.addEventListener('change', () => void session.current?.startCamera(select?.value).catch(() => setControlError('摄像头切换失败，请检查设备。')));
+      label.append(select); roomDevice.append(label);
+    }).catch(() => setControlError('无法读取摄像头设备列表。'));
+    return () => select?.closest('label')?.remove();
+  }, [listenOnly, credentials?.participantId]);
   const visibleMembers: Member[] = [...members, ...state.members.map((member) => ({ ...member, avatarId: AVATARS.some((avatar) => avatar.id === member.avatarId) ? member.avatarId as AvatarId : 'fox', speaking: state.activeSpeakerIds.includes(member.id) }))];
   const self: Member = { id: 'self', name: listenOnly ? `${nickname} · 仅收听` : nickname, avatarId, speaking: !muted && state.localSpeaking };
   const leave = async () => { try { await session.current?.leave(); } catch { setControlError('释放音频失败，已离开房间。'); } finally { onLeave(); } };
@@ -114,7 +130,7 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   useEffect(() => {
     if (!recording) { if (recorder.current) void recorder.current.stop().catch(() => undefined); recorder.current = undefined; return; }
     const canvas = document.createElement('canvas');
-    const tiles = () => [...document.querySelectorAll<HTMLVideoElement>('.video-tile video')].map((element, index) => ({ element, x: index === 0 ? 0 : (index % 2) * 320, y: index === 0 ? 0 : Math.floor(index / 2) * 180, width: index === 0 ? 1280 : 320, height: index === 0 ? 720 : 180 }));
+    const tiles = () => [...document.querySelectorAll<HTMLVideoElement>('.video-tile video, .screen-share video')].map((element, index) => ({ element, x: index === 0 ? 0 : (index % 2) * 320, y: index === 0 ? 0 : Math.floor(index / 2) * 180, width: index === 0 ? 1280 : 320, height: index === 0 ? 720 : 180 }));
     try { const remoteAudio = [...document.querySelectorAll<HTMLAudioElement>('[data-livekit-audio="true"]')].map((element) => element.srcObject instanceof MediaStream ? element.srcObject.getAudioTracks()[0] : undefined).filter((track): track is MediaStreamTrack => Boolean(track)); recorder.current = new LocalCompositeRecorder({ canvas, tiles, audioTracks: [...(session.current?.getRecorderAudioTracks() ?? []), ...remoteAudio] }); recorder.current.start(); setControlError(''); }
     catch { recorder.current = undefined; setRecording(false); setControlError('浏览器不支持本地录制。'); }
     return () => { if (recorder.current) void recorder.current.stop().catch(() => undefined); };
@@ -131,10 +147,10 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
     const form = document.createElement('form'); form.className = 'chat-form';
     const input = document.createElement('input'); input.placeholder = '输入消息'; input.setAttribute('aria-label', '聊天消息');
     const send = document.createElement('button'); send.type = 'submit'; send.className = 'outline'; send.textContent = '发送';
-    form.append(input, send); form.addEventListener('submit', (event) => { event.preventDefault(); if (input.value.trim()) void session.current?.sendChat(input.value, nickname); input.value = ''; });
+    form.append(input, send); form.addEventListener('submit', (event) => { event.preventDefault(); if (input.value.trim()) void session.current?.sendChat(input.value, nickname).catch(() => setControlError('消息发送失败，请重试。')); input.value = ''; });
     panel.append(messages, form);
     if ((state.raisedHands ?? []).length) { const hands = document.createElement('p'); hands.className = 'raised-hands'; hands.textContent = `举手：${(state.raisedHands ?? []).join('、')}`; panel.append(hands); }
   }, [chatOpen, state.chatMessages, state.raisedHands, nickname]);
-  useEffect(() => { if (session.current) void session.current.setHandRaised(handRaised).catch(() => undefined); }, [handRaised]);
+  useEffect(() => { if (session.current) void session.current.setHandRaised(handRaised).catch(() => setControlError('举手状态同步失败，请重试。')); }, [handRaised]);
   return <main className="console room"><header><p className="eyebrow">ROOM / {roomId}</p><h1>会议已接通</h1><p className="subtitle">{state.connection === 'reconnecting' ? '正在恢复连接…' : state.connection === 'disconnected' ? '连接已断开' : listenOnly ? '仅收听 · 已连接 RTC' : '720p 自适应视频 · RTC 已连接'}</p></header><MeetingLayout participants={participants} activeSpeakerIds={state.activeSpeakerIds} screenTrack={state.screenTracks.self ?? Object.values(state.screenTracks)[0]} />{!listenOnly && <div className="input-grid room-device"><label>麦克风设备<select aria-label="房内麦克风设备" value={deviceId} onChange={(event) => void changeDevice(event.target.value)}><option value="">自动选择</option>{devices.map((device) => <option value={device.deviceId} key={device.deviceId}>{device.label}</option>)}</select></label><button className="refresh" onClick={onRefreshDevices}>↻ 刷新设备</button></div>}{controlError && <p role="alert" className="notice">{controlError}</p>}<div className="meeting-extra"><button className="outline" aria-pressed={chatOpen} onClick={() => setChatOpen(!chatOpen)}>聊天</button><button className="outline" aria-pressed={handRaised} onClick={() => setHandRaised(!handRaised)}>{handRaised ? '放下手' : '举手'}</button></div>{chatOpen && <aside className="chat-panel" aria-label="文字聊天"><p>聊天功能已打开，消息通道将在加入会议后启用。</p></aside>}<MeetingControls muted={muted} cameraEnabled={state.localCameraEnabled} sharingScreen={state.localScreenSharing} recording={recording} handlers={{ onMute: () => void toggleMute(), onCamera: () => void toggleCamera(), onScreenShare: () => void toggleScreen(), onRecord: () => setRecording(!recording), onLeave: () => void leave() }} disabled={state.connection !== 'connected'} />{state.connection === 'disconnected' && onReconnect && <button className="primary" onClick={onReconnect}>重新入场</button>}</main>;
 };
