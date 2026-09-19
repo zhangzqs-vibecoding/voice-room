@@ -137,7 +137,8 @@ export class LiveKitSessionAdapter implements SessionAdapter {
       let avatarId = 'fox';
       try { avatarId = (JSON.parse(participant.metadata || '{}') as { avatarId?: string }).avatarId ?? avatarId; } catch { /* metadata is optional */ }
       const camera = participant.getTrackPublication(Track.Source.Camera);
-      return { id: participant.identity, name: participant.name || participant.identity, avatarId, cameraTrackSid: camera?.trackSid, cameraEnabled: Boolean(camera && !camera.isMuted) };
+      const microphone = participant.getTrackPublication(Track.Source.Microphone);
+      return { id: participant.identity, name: participant.name || participant.identity, avatarId, cameraTrackSid: camera?.trackSid, microphoneTrackSid: microphone?.trackSid, cameraEnabled: Boolean(camera && !camera.isMuted) };
     });
     this.emit({ type: 'participants', members });
   }

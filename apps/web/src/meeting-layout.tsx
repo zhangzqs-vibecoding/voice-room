@@ -9,6 +9,7 @@ export interface VideoParticipant {
   speaking: boolean;
   host?: boolean;
   trackSid?: string;
+  microphoneTrackSid?: string;
 }
 
 const VideoTile = ({ participant, featured }: { participant: VideoParticipant; featured?: boolean }) => {
@@ -18,7 +19,7 @@ const VideoTile = ({ participant, featured }: { participant: VideoParticipant; f
     video.current.srcObject = participant.track ? new MediaStream([participant.track]) : null;
     return () => { if (video.current) video.current.srcObject = null; };
   }, [participant.track]);
-  return <article className={`video-tile${featured ? ' video-tile-featured' : ''}`} data-participant={participant.id} data-track-sid={participant.trackSid ?? ''} data-speaking={participant.speaking}>
+  return <article className={`video-tile${featured ? ' video-tile-featured' : ''}`} data-participant={participant.id} data-track-sid={participant.trackSid ?? ''} data-mic-track-sid={participant.microphoneTrackSid ?? ''} data-speaking={participant.speaking}>
     {participant.track && participant.cameraEnabled ? <video ref={video} autoPlay playsInline muted={participant.id === 'self'} /> : <div className="video-avatar" aria-label={`${participant.name} 摄像头已关闭`}>{participant.avatar}</div>}
     <div className="video-name"><span>{participant.speaking ? '● ' : ''}{participant.name}</span>{participant.host && <small>主持人</small>}</div>
   </article>;

@@ -8,7 +8,7 @@ import { LocalCompositeRecorder } from './local-recorder.js';
 import { AVATARS, type AudioMode, type AvatarId, loadPreferences, savePreferences, validateNickname } from './domain.js';
 
 type MediaDevicesLike = Pick<MediaDevices, 'enumerateDevices'>;
-interface Member { id: string; name: string; avatarId: AvatarId; speaking: boolean; cameraTrackSid?: string; cameraEnabled?: boolean }
+interface Member { id: string; name: string; avatarId: AvatarId; speaking: boolean; cameraTrackSid?: string; microphoneTrackSid?: string; cameraEnabled?: boolean }
 interface Props { mediaDevices?: MediaDevicesLike; members?: Member[]; sessionFactory?: () => SessionAdapter }
 interface Device { deviceId: string; label: string }
 const meetingPath = () => { const match = location.pathname.match(/^\/meeting\/([^/]+)/); return match ? decodeURIComponent(match[1]) : ''; };
@@ -100,7 +100,7 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   useEffect(() => {
     if (!credentials) return;
     const next = new AudioSession(sessionFactoryRef.current(), setState); session.current = next;
-    void next.enter({ ...credentials, listenOnly, mode, deviceId }).then(() => listenOnly ? undefined : next.startCamera()).catch(() => undefined);
+    void next.enter({ ...credentials, listenOnly, mode, deviceId }).then(() => listenOnly ? undefined : next.startCamera()).catch((error) => setControlError(error instanceof Error && error.message === 'video_not_supported' ? '摄像头不可用，请检查浏览器权限。' : '会议连接失败，请重试。'));
     return () => { void next.leave().catch(() => undefined); };
   }, [credentials?.livekitUrl, credentials?.participantId, credentials?.token]);
   const visibleMembers: Member[] = [...members, ...state.members.map((member) => ({ ...member, avatarId: AVATARS.some((avatar) => avatar.id === member.avatarId) ? member.avatarId as AvatarId : 'fox', speaking: state.activeSpeakerIds.includes(member.id) }))];
@@ -108,7 +108,7 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   const leave = async () => { try { await session.current?.leave(); } catch { setControlError('释放音频失败，已离开房间。'); } finally { onLeave(); } };
   const toggleMute = async () => { const next = !muted; try { await session.current?.setMuted(next); setMuted(next); setControlError(''); } catch { setControlError('静音切换失败，请重试。'); } };
   const changeDevice = async (nextDeviceId: string) => { try { await session.current?.switchDevice(nextDeviceId, mode); onDeviceChange?.(nextDeviceId); setControlError(''); } catch { setControlError('麦克风切换失败，请检查设备后重试。'); } };
-  const participants: VideoParticipant[] = [{ id: 'self', name: self.name, avatar: AVATARS.find((item) => item.id === avatarId)?.icon ?? '🦊', track: state.videoTracks.self, cameraEnabled: state.localCameraEnabled, speaking: !muted && state.localSpeaking }, ...visibleMembers.map((member) => ({ id: member.id, name: member.name, avatar: AVATARS.find((item) => item.id === member.avatarId)?.icon ?? '🦊', track: state.videoTracks[member.id], trackSid: member.cameraTrackSid, cameraEnabled: member.cameraEnabled !== false && Boolean(state.videoTracks[member.id]), speaking: member.speaking }))];
+  const participants: VideoParticipant[] = [{ id: 'self', name: self.name, avatar: AVATARS.find((item) => item.id === avatarId)?.icon ?? '🦊', track: state.videoTracks.self, cameraEnabled: state.localCameraEnabled, speaking: !muted && state.localSpeaking }, ...visibleMembers.map((member) => ({ id: member.id, name: member.name, avatar: AVATARS.find((item) => item.id === member.avatarId)?.icon ?? '🦊', track: state.videoTracks[member.id], trackSid: member.cameraTrackSid, microphoneTrackSid: member.microphoneTrackSid, cameraEnabled: member.cameraEnabled !== false && Boolean(state.videoTracks[member.id]), speaking: member.speaking }))];
   const toggleCamera = async () => { try { await session.current?.setCameraEnabled(!state.localCameraEnabled); setControlError(''); } catch { setControlError('摄像头不可用，请检查浏览器权限。'); } };
   const toggleScreen = async () => { try { if (state.localScreenSharing) await session.current?.stopScreenShare(); else await session.current?.startScreenShare(); setControlError(''); } catch { setControlError('屏幕共享不可用或已被取消。'); } };
   useEffect(() => {

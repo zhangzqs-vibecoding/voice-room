@@ -3,7 +3,7 @@ import type { AudioMode } from './domain.js';
 export type AudioConstraints = MediaTrackConstraints;
 export type VideoConstraints = MediaTrackConstraints;
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
-export interface RemoteMember { id: string; name: string; avatarId: string; cameraTrackSid?: string; cameraEnabled?: boolean }
+export interface RemoteMember { id: string; name: string; avatarId: string; cameraTrackSid?: string; microphoneTrackSid?: string; cameraEnabled?: boolean }
 export interface SessionEvent {
   type: 'connected' | 'reconnecting' | 'reconnected' | 'disconnected' | 'active-speakers' | 'local-level' | 'participants' | 'video-track' | 'screen-track' | 'track-removed' | 'screen-share' | 'participant-camera' | 'chat' | 'hand';
   participantIds?: string[];

@@ -852,12 +852,14 @@ describe('voice room API', () => {
     const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
     const remove = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/remove`, payload: { hostToken } });
     const mute = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/mute`, payload: { hostToken, trackSid: 'TR_1', muted: true } });
+    const camera = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/camera`, payload: { hostToken, trackSid: 'TR_CAM_1', muted: true } });
     const end = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/end`, payload: { hostToken } });
     expect(remove.statusCode).toBe(204);
     expect(mute.statusCode).toBe(204);
+    expect(camera.statusCode).toBe(204);
     expect(end.statusCode).toBe(204);
     expect(livekit.removedParticipants).toEqual([{ room: roomId, identity: 'member-1' }]);
-    expect(livekit.mutedTracks).toEqual([{ room: roomId, identity: 'member-1', trackSid: 'TR_1', muted: true }]);
+    expect(livekit.mutedTracks).toEqual([{ room: roomId, identity: 'member-1', trackSid: 'TR_1', muted: true }, { room: roomId, identity: 'member-1', trackSid: 'TR_CAM_1', muted: true }]);
     expect(livekit.deletedRooms).toEqual([roomId]);
     await app.close();
   });

@@ -19,6 +19,7 @@ export interface LiveKitGateway {
   roomExists(roomName: string, signal?: AbortSignal): Promise<boolean>;
   removeParticipant(roomName: string, participantId: string): Promise<void>;
   mutePublishedTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void>;
+  muteCameraTrack?(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void>;
   deleteRoom(roomName: string): Promise<void>;
 }
 
@@ -372,6 +373,20 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (typeof body?.trackSid !== 'string' || typeof body.muted !== 'boolean') return reply.code(400).send({ error: 'invalid_request' });
     try {
       await options.livekit.mutePublishedTrack(roomId, participantId, body.trackSid, body.muted);
+      return reply.code(204).send();
+    } catch {
+      return reply.code(502).send({ error: 'room_service_unavailable' });
+    }
+  });
+
+  app.post('/api/rooms/:roomId/participants/:participantId/camera', async (request, reply) => {
+    const { roomId, participantId } = request.params as { roomId: string; participantId: string };
+    if (!requireHost(request, roomId, reply)) return;
+    const body = request.body as Record<string, unknown> | undefined;
+    if (typeof body?.trackSid !== 'string' || typeof body.muted !== 'boolean') return reply.code(400).send({ error: 'invalid_request' });
+    try {
+      if (options.livekit.muteCameraTrack) await options.livekit.muteCameraTrack(roomId, participantId, body.trackSid, body.muted);
+      else await options.livekit.mutePublishedTrack(roomId, participantId, body.trackSid, body.muted);
       return reply.code(204).send();
     } catch {
       return reply.code(502).send({ error: 'room_service_unavailable' });

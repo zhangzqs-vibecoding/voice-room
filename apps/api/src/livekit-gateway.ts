@@ -58,6 +58,9 @@ export class LiveKitServerGateway implements LiveKitGateway {
   async mutePublishedTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void> {
     await this.roomService.mutePublishedTrack(roomName, participantId, trackSid, muted);
   }
+  async muteCameraTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void> {
+    await this.roomService.mutePublishedTrack(roomName, participantId, trackSid, muted);
+  }
 
   async deleteRoom(roomName: string): Promise<void> {
     await this.roomService.deleteRoom(roomName);
