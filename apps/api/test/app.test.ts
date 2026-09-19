@@ -834,6 +834,37 @@ describe('voice room API', () => {
     await app.close();
   });
 
+  it('returns a host lease token and releases the host lease on leave', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, hostUrl, participantUrl } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const hostJoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'host', avatarId: 'owl', hostToken } });
+    expect(hostJoin.json().participantLeaseToken).toBe(hostToken);
+    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${hostJoin.json().participantId}/leave`, payload: { participantLeaseToken: hostJoin.json().participantLeaseToken } });
+    expect(leave.statusCode).toBe(204);
+    const guest = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    expect(guest.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('renews a participant lease with a valid heartbeat token', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    const participantId = join.json().participantId;
+    livekit.roomStillExists = true;
+    currentTime = 100_000;
+    const heartbeat = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/heartbeat`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(heartbeat.statusCode).toBe(200);
+    expect(heartbeat.json().expiresAt).toBeGreaterThan(currentTime);
+    await app.close();
+  });
+
   it.each([1, 51, 2.5, '20', null])('rejects invalid maxParticipants %j', async (maxParticipants) => {
     const { app, livekit } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants } });

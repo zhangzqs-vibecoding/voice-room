@@ -318,7 +318,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         room.reservedParticipants -= 1;
         room.activeParticipants += 1;
         room.activeParticipantLeases.set(participantId, { expiresAt: Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000) });
-        return { participantId, livekitUrl: options.config.livekitPublicUrl, token };
+        return { participantId, participantLeaseToken: isHost ? room.hostSecret : room.participantSecret, livekitUrl: options.config.livekitPublicUrl, token };
       } catch (error) {
         if (!isRoomExpiredError(error)) {
           room.reservedParticipants -= 1;
@@ -382,11 +382,30 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     const room = knownRooms.get(roomId);
     if (!room) return reply.code(404).send({ error: 'room_not_found' });
     const body = request.body as Record<string, unknown> | undefined;
-    if (!secretMatches(typeof body?.participantToken === 'string' ? body.participantToken : undefined, room.participantSecret)) {
+    const leaseToken = typeof body?.participantLeaseToken === 'string' ? body.participantLeaseToken : typeof body?.participantToken === 'string' ? body.participantToken : undefined;
+    if (!secretMatches(leaseToken, room.participantSecret) && !secretMatches(leaseToken, room.hostSecret)) {
       return reply.code(403).send({ error: 'credential_invalid' });
     }
     if (room.activeParticipantLeases.delete(participantId)) room.activeParticipants -= 1;
     return reply.code(204).send();
+  });
+
+  app.post('/api/rooms/:roomId/participants/:participantId/heartbeat', async (request, reply) => {
+    const { roomId, participantId } = request.params as { roomId: string; participantId: string };
+    const room = knownRooms.get(roomId);
+    if (!room) return reply.code(404).send({ error: 'room_not_found' });
+    const body = request.body as Record<string, unknown> | undefined;
+    const leaseToken = typeof body?.participantLeaseToken === 'string' ? body.participantLeaseToken : undefined;
+    if (!secretMatches(leaseToken, room.participantSecret) && !secretMatches(leaseToken, room.hostSecret)) return reply.code(403).send({ error: 'credential_invalid' });
+    const lease = room.activeParticipantLeases.get(participantId);
+    if (!lease || lease.expiresAt <= now()) return reply.code(404).send({ error: 'lease_expired' });
+    if (now() >= room.expiresAt) {
+      const refreshResult = await refreshExpiredRoom(roomId, room);
+      if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+      if (refreshResult === 'unavailable' || refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
+    }
+    lease.expiresAt = Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000);
+    return reply.code(200).send({ expiresAt: lease.expiresAt });
   });
 
   app.post('/api/rooms/:roomId/participants/:participantId/mute', async (request, reply) => {
