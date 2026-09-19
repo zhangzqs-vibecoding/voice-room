@@ -8,7 +8,17 @@ export interface MeetingControlHandlers {
 
 export const MeetingControls = ({ muted, cameraEnabled, sharingScreen, recording, handlers, disabled = false }: { muted: boolean; cameraEnabled: boolean; sharingScreen: boolean; recording: boolean; handlers: MeetingControlHandlers; disabled?: boolean }) => {
   const isHost = typeof location !== 'undefined' && new URLSearchParams(location.search).has('hostToken');
-  const hostAction = async (action: 'mute' | 'remove' | 'lock' | 'end') => { const room = location.pathname.match(/^\/meeting\/([^/]+)/)?.[1]; if (!room) return; await fetch(`/api/rooms/${room}/host/${action}`, { method: 'POST', headers: { authorization: `Bearer ${new URLSearchParams(location.search).get('hostToken') ?? ''}` } }).catch(() => undefined); };
+  const hostAction = async (action: 'mute' | 'remove' | 'lock' | 'end') => {
+    const room = location.pathname.match(/^\/meeting\/([^/]+)/)?.[1]; if (!room) return;
+    const target = document.querySelector<HTMLElement>('.video-tile[data-participant]:not([data-participant="self"])');
+    const participantId = target?.dataset.participant;
+    if ((action === 'mute' || action === 'remove') && !participantId) return;
+    if (action === 'mute' && !target?.dataset.trackSid) return;
+    const base = `/api/rooms/${room}`;
+    const path = action === 'lock' ? `${base}/lock` : action === 'end' ? `${base}/end` : `${base}/participants/${encodeURIComponent(participantId!)}/${action}`;
+    const body = action === 'lock' ? { locked: true } : action === 'mute' ? { trackSid: target?.dataset.trackSid, muted: true } : undefined;
+    await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-host-token': new URLSearchParams(location.search).get('hostToken') ?? '' }, ...(body ? { body: JSON.stringify(body) } : {}) }).catch(() => undefined);
+  };
   return <nav className="meeting-controls" aria-label="会议控制">
   <button className="outline" aria-pressed={muted} onClick={handlers.onMute} disabled={disabled}>{muted ? '解除静音' : '静音'}</button>
   <button className="outline" aria-pressed={!cameraEnabled} onClick={handlers.onCamera} disabled={disabled}>{cameraEnabled ? '关闭摄像头' : '开启摄像头'}</button>

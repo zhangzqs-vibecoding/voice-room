@@ -8,7 +8,7 @@ import { LocalCompositeRecorder } from './local-recorder.js';
 import { AVATARS, type AudioMode, type AvatarId, loadPreferences, savePreferences, validateNickname } from './domain.js';
 
 type MediaDevicesLike = Pick<MediaDevices, 'enumerateDevices'>;
-interface Member { id: string; name: string; avatarId: AvatarId; speaking: boolean }
+interface Member { id: string; name: string; avatarId: AvatarId; speaking: boolean; cameraTrackSid?: string; cameraEnabled?: boolean }
 interface Props { mediaDevices?: MediaDevicesLike; members?: Member[]; sessionFactory?: () => SessionAdapter }
 interface Device { deviceId: string; label: string }
 const meetingPath = () => { const match = location.pathname.match(/^\/meeting\/([^/]+)/); return match ? decodeURIComponent(match[1]) : ''; };
@@ -54,6 +54,13 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
     label.append(select); container.append(label);
     return () => label.remove();
   }, [maxParticipants]);
+  useEffect(() => {
+    const invite = document.querySelector<HTMLElement>('.invite');
+    if (!invite || !hostInviteUrl || invite.querySelector('[data-host-invite]')) return;
+    const label = document.createElement('label'); label.dataset.hostInvite = 'true'; label.textContent = '主持人链接';
+    const input = document.createElement('input'); input.value = new URL(hostInviteUrl, location.href).toString(); input.readOnly = true; input.setAttribute('aria-label', '主持人链接'); label.append(input); invite.append(label);
+    return () => label.remove();
+  }, [hostInviteUrl]);
   const persist = () => savePreferences({ nickname: validateNickname(nickname) ?? '', avatarId, deviceId, mode });
   const enter = async (nextListenOnly: boolean) => {
     const validName = validateNickname(nickname);
@@ -66,7 +73,7 @@ export const App = ({ mediaDevices = navigator.mediaDevices, members = [], sessi
   };
   const makeRoom = async () => {
     setBusy(true); setMessage('');
-    try { const room = await createRoom(maxParticipants); const url = room.participantUrl || new URL(`?room=${encodeURIComponent(room.roomId)}`, location.href).toString(); setRoomId(room.roomId); setInviteUrl(url); setHostInviteUrl(room.hostUrl || url); history.replaceState(null, '', new URL(url).pathname + new URL(url).search); setMessage('邀请链接已生成，复制后发送给朋友。'); }
+    try { const room = await createRoom(maxParticipants); const url = room.participantUrl || new URL(`?room=${encodeURIComponent(room.roomId)}`, location.href).toString(); const hostUrl = room.hostUrl || url; setRoomId(room.roomId); setInviteUrl(url); setHostInviteUrl(hostUrl); const hostLocation = new URL(hostUrl, location.href); history.replaceState(null, '', hostLocation.pathname + hostLocation.search); setMessage('邀请链接已生成。当前浏览器已使用主持人链接，参会链接可发送给朋友。'); }
     catch { setMessage('创建房间失败，请稍后重试。'); } finally { setBusy(false); }
   };
   const copyInvite = async () => {
@@ -101,14 +108,14 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
   const leave = async () => { try { await session.current?.leave(); } catch { setControlError('释放音频失败，已离开房间。'); } finally { onLeave(); } };
   const toggleMute = async () => { const next = !muted; try { await session.current?.setMuted(next); setMuted(next); setControlError(''); } catch { setControlError('静音切换失败，请重试。'); } };
   const changeDevice = async (nextDeviceId: string) => { try { await session.current?.switchDevice(nextDeviceId, mode); onDeviceChange?.(nextDeviceId); setControlError(''); } catch { setControlError('麦克风切换失败，请检查设备后重试。'); } };
-  const participants: VideoParticipant[] = [{ id: 'self', name: self.name, avatar: AVATARS.find((item) => item.id === avatarId)?.icon ?? '🦊', track: state.videoTracks.self, cameraEnabled: state.localCameraEnabled, speaking: !muted && state.localSpeaking }, ...visibleMembers.map((member) => ({ id: member.id, name: member.name, avatar: AVATARS.find((item) => item.id === member.avatarId)?.icon ?? '🦊', track: state.videoTracks[member.id], cameraEnabled: Boolean(state.videoTracks[member.id]), speaking: member.speaking }))];
+  const participants: VideoParticipant[] = [{ id: 'self', name: self.name, avatar: AVATARS.find((item) => item.id === avatarId)?.icon ?? '🦊', track: state.videoTracks.self, cameraEnabled: state.localCameraEnabled, speaking: !muted && state.localSpeaking }, ...visibleMembers.map((member) => ({ id: member.id, name: member.name, avatar: AVATARS.find((item) => item.id === member.avatarId)?.icon ?? '🦊', track: state.videoTracks[member.id], trackSid: member.cameraTrackSid, cameraEnabled: member.cameraEnabled !== false && Boolean(state.videoTracks[member.id]), speaking: member.speaking }))];
   const toggleCamera = async () => { try { await session.current?.setCameraEnabled(!state.localCameraEnabled); setControlError(''); } catch { setControlError('摄像头不可用，请检查浏览器权限。'); } };
   const toggleScreen = async () => { try { if (state.localScreenSharing) await session.current?.stopScreenShare(); else await session.current?.startScreenShare(); setControlError(''); } catch { setControlError('屏幕共享不可用或已被取消。'); } };
   useEffect(() => {
     if (!recording) { if (recorder.current) void recorder.current.stop().catch(() => undefined); recorder.current = undefined; return; }
     const canvas = document.createElement('canvas');
     const tiles = () => [...document.querySelectorAll<HTMLVideoElement>('.video-tile video')].map((element, index) => ({ element, x: index === 0 ? 0 : (index % 2) * 320, y: index === 0 ? 0 : Math.floor(index / 2) * 180, width: index === 0 ? 1280 : 320, height: index === 0 ? 720 : 180 }));
-    try { recorder.current = new LocalCompositeRecorder({ canvas, tiles, audioTracks: [...document.querySelectorAll<HTMLAudioElement>('[data-livekit-audio="true"]')].map((element) => element.srcObject instanceof MediaStream ? element.srcObject.getAudioTracks()[0] : undefined).filter((track): track is MediaStreamTrack => Boolean(track)) }); recorder.current.start(); setControlError(''); }
+    try { const remoteAudio = [...document.querySelectorAll<HTMLAudioElement>('[data-livekit-audio="true"]')].map((element) => element.srcObject instanceof MediaStream ? element.srcObject.getAudioTracks()[0] : undefined).filter((track): track is MediaStreamTrack => Boolean(track)); recorder.current = new LocalCompositeRecorder({ canvas, tiles, audioTracks: [...(session.current?.getRecorderAudioTracks() ?? []), ...remoteAudio] }); recorder.current.start(); setControlError(''); }
     catch { recorder.current = undefined; setRecording(false); setControlError('浏览器不支持本地录制。'); }
     return () => { if (recorder.current) void recorder.current.stop().catch(() => undefined); };
   }, [recording]);

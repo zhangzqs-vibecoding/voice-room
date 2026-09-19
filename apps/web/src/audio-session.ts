@@ -3,7 +3,7 @@ import type { AudioMode } from './domain.js';
 export type AudioConstraints = MediaTrackConstraints;
 export type VideoConstraints = MediaTrackConstraints;
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
-export interface RemoteMember { id: string; name: string; avatarId: string }
+export interface RemoteMember { id: string; name: string; avatarId: string; cameraTrackSid?: string; cameraEnabled?: boolean }
 export interface SessionEvent {
   type: 'connected' | 'reconnecting' | 'reconnected' | 'disconnected' | 'active-speakers' | 'local-level' | 'participants' | 'video-track' | 'screen-track' | 'track-removed' | 'screen-share' | 'participant-camera' | 'chat' | 'hand';
   participantIds?: string[];
@@ -13,6 +13,7 @@ export interface SessionEvent {
   track?: MediaStreamTrack;
   source?: 'camera' | 'screen';
   enabled?: boolean;
+  trackSid?: string;
   message?: { id: string; name: string; text: string };
   handRaised?: boolean;
 }
@@ -28,6 +29,7 @@ export interface SessionAdapter {
   startScreenShare?: () => Promise<void>;
   stopScreenShare?: () => Promise<void>;
   sendData?: (payload: Uint8Array) => Promise<void>;
+  getRecorderAudioTracks?: () => MediaStreamTrack[];
 }
 export interface SessionState { connection: ConnectionState; activeSpeakerIds: string[]; localSpeaking: boolean; members: RemoteMember[]; videoTracks: Record<string, MediaStreamTrack>; screenTracks: Record<string, MediaStreamTrack>; localCameraEnabled: boolean; localScreenSharing: boolean; chatMessages?: Array<{ id: string; name: string; text: string }>; raisedHands?: string[]; disconnectReason?: string }
 export interface EnterOptions { livekitUrl: string; token: string; listenOnly: boolean; mode: AudioMode; deviceId: string }
@@ -97,6 +99,7 @@ export class AudioSession {
   }
   async sendChat(text: string, name: string): Promise<void> { if (!this.adapter.sendData) throw new Error('data_not_supported'); await this.adapter.sendData(new TextEncoder().encode(JSON.stringify({ type: 'chat', id: crypto.randomUUID(), name, text: text.trim().slice(0, 500) }))); }
   async setHandRaised(raised: boolean): Promise<void> { if (!this.adapter.sendData) throw new Error('data_not_supported'); await this.adapter.sendData(new TextEncoder().encode(JSON.stringify({ type: 'hand', raised }))); }
+  getRecorderAudioTracks(): MediaStreamTrack[] { return this.adapter.getRecorderAudioTracks?.() ?? []; }
   async leave(): Promise<void> {
     if (this.leaving) return this.leaving;
     this.leaving = this.leaveOnce();
@@ -118,9 +121,7 @@ export class AudioSession {
       if (event.source === 'screen') { const screenTracks = { ...this.state.screenTracks }; delete screenTracks[id]; this.update({ screenTracks }); }
       else { const videoTracks = { ...this.state.videoTracks }; delete videoTracks[id]; this.update({ videoTracks }); }
     }
-    if (event.type === 'participant-camera' && event.participantIds?.[0] && event.enabled === false) {
-      const videoTracks = { ...this.state.videoTracks }; delete videoTracks[event.participantIds[0]]; this.update({ videoTracks });
-    }
+    if (event.type === 'participant-camera' && event.participantIds?.[0]) this.update({ members: this.state.members.map((member) => member.id === event.participantIds![0] ? { ...member, cameraEnabled: event.enabled, cameraTrackSid: event.trackSid ?? member.cameraTrackSid } : member) });
     if (event.type === 'screen-share') this.update({ localScreenSharing: Boolean(event.speaking) });
     if (event.type === 'chat' && event.message) this.update({ chatMessages: [...(this.state.chatMessages ?? []), event.message] });
     if (event.type === 'hand' && event.participantIds?.[0]) { const hands = this.state.raisedHands ?? []; this.update({ raisedHands: event.handRaised ? [...new Set([...hands, event.participantIds[0]])] : hands.filter((id) => id !== event.participantIds![0]) }); }

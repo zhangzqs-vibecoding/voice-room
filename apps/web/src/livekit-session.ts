@@ -28,8 +28,8 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     this.room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => { this.detachRemoteTrack(track, publication.source, participant.identity); });
     this.room.on(RoomEvent.ParticipantConnected, () => this.emitMembers());
     this.room.on(RoomEvent.ParticipantDisconnected, (participant) => { for (const [track, info] of this.videoTracks) if (info.participantId === participant.identity) { this.videoTracks.delete(track); this.emit({ type: 'track-removed', participantIds: [participant.identity], source: info.source === Track.Source.ScreenShare ? 'screen' : 'camera' }); } this.emitMembers(); });
-    this.room.on(RoomEvent.TrackMuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: false }); });
-    this.room.on(RoomEvent.TrackUnmuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: true }); });
+    this.room.on(RoomEvent.TrackMuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: false, trackSid: publication.trackSid }); });
+    this.room.on(RoomEvent.TrackUnmuted, (publication, participant) => { if (publication.source === Track.Source.Camera) this.emit({ type: 'participant-camera', participantIds: [participant.identity], enabled: true, trackSid: publication.trackSid }); });
     this.room.on(RoomEvent.DataReceived, (payload, participant) => {
       try {
         const event = JSON.parse(new TextDecoder().decode(payload)) as { type?: string; id?: string; name?: string; text?: string; raised?: boolean };
@@ -88,6 +88,7 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     this.emit({ type: 'screen-share', speaking: false });
   }
   async sendData(payload: Uint8Array): Promise<void> { await this.room.localParticipant.publishData(payload as Uint8Array<ArrayBuffer>, { reliable: true }); }
+  getRecorderAudioTracks(): MediaStreamTrack[] { return this.localTrack ? [this.localTrack.mediaStreamTrack] : []; }
   onEvent(listener: (event: SessionEvent) => void): () => void { this.listener = listener; return () => { if (this.listener === listener) this.listener = undefined; }; }
   async disconnect(): Promise<void> {
     this.stopLevelMeter();
@@ -135,7 +136,8 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     const members: RemoteMember[] = [...this.room.remoteParticipants.values()].map((participant) => {
       let avatarId = 'fox';
       try { avatarId = (JSON.parse(participant.metadata || '{}') as { avatarId?: string }).avatarId ?? avatarId; } catch { /* metadata is optional */ }
-      return { id: participant.identity, name: participant.name || participant.identity, avatarId };
+      const camera = participant.getTrackPublication(Track.Source.Camera);
+      return { id: participant.identity, name: participant.name || participant.identity, avatarId, cameraTrackSid: camera?.trackSid, cameraEnabled: Boolean(camera && !camera.isMuted) };
     });
     this.emit({ type: 'participants', members });
   }
