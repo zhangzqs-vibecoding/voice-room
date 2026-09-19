@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createRoom, heartbeatParticipant, joinRoom, releaseParticipant, type JoinResponse } from './api.js';
+import { createRoom, heartbeatParticipant, joinRoom, refreshParticipantToken, releaseParticipant, type JoinResponse } from './api.js';
 import { AudioSession, type SessionAdapter, type SessionState } from './audio-session.js';
 import { LiveKitSessionAdapter } from './livekit-session.js';
 import { MeetingControls } from './meeting-controls.js';
@@ -103,7 +103,10 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
     void next.enter({ ...credentials, listenOnly, mode, deviceId }).then(() => listenOnly ? undefined : next.startCamera()).catch((error) => setControlError(error instanceof Error && error.message === 'video_not_supported' ? '摄像头不可用，请检查浏览器权限。' : '会议连接失败，请重试。'));
     const leaseToken = credentials.participantLeaseToken;
     const heartbeat = leaseToken ? window.setInterval(() => { void heartbeatParticipant(roomId, credentials.participantId, leaseToken).catch(() => undefined); }, 60_000) : undefined;
-    return () => { if (heartbeat !== undefined) window.clearInterval(heartbeat); if (leaseToken) void releaseParticipant(roomId, credentials.participantId, leaseToken).catch(() => undefined); void next.leave().catch(() => undefined); };
+    const tokenRefresh = leaseToken ? window.setInterval(() => {
+      void refreshParticipantToken(roomId, credentials.participantId, leaseToken).then((fresh) => next.refreshToken(fresh.livekitUrl, fresh.token)).catch(() => undefined);
+    }, 240_000) : undefined;
+    return () => { if (heartbeat !== undefined) window.clearInterval(heartbeat); if (tokenRefresh !== undefined) window.clearInterval(tokenRefresh); if (leaseToken) void releaseParticipant(roomId, credentials.participantId, leaseToken).catch(() => undefined); void next.leave().catch(() => undefined); };
   }, [credentials?.livekitUrl, credentials?.participantId, credentials?.token]);
   useEffect(() => {
     if (listenOnly || !navigator.mediaDevices?.enumerateDevices) return;

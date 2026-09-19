@@ -19,6 +19,7 @@ export interface SessionEvent {
 }
 export interface SessionAdapter {
   connect(url: string, token: string): Promise<void>;
+  refreshToken?: (url: string, token: string) => Promise<void>;
   publish(constraints: AudioConstraints): Promise<void>;
   setMuted(muted: boolean): Promise<void>;
   switchDevice(constraints: AudioConstraints): Promise<void>;
@@ -70,6 +71,7 @@ export class AudioSession {
       throw error;
     }
   }
+  async refreshToken(url: string, token: string): Promise<void> { await this.adapter.refreshToken?.(url, token); }
 
   async setMuted(muted: boolean): Promise<void> { if (!this.listening) await this.adapter.setMuted(muted); this.muted = muted; }
   async switchDevice(deviceId: string, mode: AudioMode): Promise<void> {

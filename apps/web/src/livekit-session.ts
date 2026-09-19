@@ -39,6 +39,11 @@ export class LiveKitSessionAdapter implements SessionAdapter {
     });
   }
   async connect(url: string, token: string): Promise<void> { await this.room.connect(url, token); this.emitMembers(); this.emit({ type: 'connected' }); }
+  async refreshToken(url: string, token: string): Promise<void> {
+    // LiveKit's reconnect path accepts a newly signed JWT and keeps the room
+    // session alive while renegotiating media.
+    await this.room.connect(url, token);
+  }
   async publish(constraints: AudioConstraints): Promise<void> {
     this.localTrack = await createLocalAudioTrack({ ...constraints });
     await this.room.localParticipant.publishTrack(this.localTrack, publishOptions(constraints));
