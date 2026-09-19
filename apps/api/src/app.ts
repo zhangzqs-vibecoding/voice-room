@@ -60,7 +60,7 @@ interface RoomState {
   expiresAt: number;
   reservedParticipants: number;
   activeParticipants: number;
-  activeParticipantLeases: Map<string, { expiresAt: number; token: string; name: string; metadata: string }>;
+  activeParticipantLeases: Map<string, { expiresAt: number; token: string; name: string; metadata: string; host: boolean }>;
   maxParticipants: number;
   hostSecret: string;
   participantSecret: string;
@@ -318,7 +318,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         room.reservedParticipants -= 1;
         room.activeParticipants += 1;
         const participantLeaseToken = randomBytes(32).toString('base64url');
-        room.activeParticipantLeases.set(participantId, { expiresAt: Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000), token: participantLeaseToken, name: identity.nickname, metadata });
+        room.activeParticipantLeases.set(participantId, { expiresAt: Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000), token: participantLeaseToken, name: identity.nickname, metadata, host: isHost });
         return { participantId, participantLeaseToken, livekitUrl: options.config.livekitPublicUrl, token };
       } catch (error) {
         if (!isRoomExpiredError(error)) {
@@ -430,7 +430,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         name: lease.name,
         roomName: roomId,
         metadata: lease.metadata,
-        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share'] },
+        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share'], ...(lease.host ? { roomAdmin: true as const } : {}) },
         maximumTtlSeconds: options.config.tokenTtlSeconds,
         expiresAtMs: room.expiresAt
       });
