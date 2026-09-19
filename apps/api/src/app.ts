@@ -60,7 +60,7 @@ interface RoomState {
   expiresAt: number;
   reservedParticipants: number;
   activeParticipants: number;
-  activeParticipantLeases: Map<string, { expiresAt: number }>;
+  activeParticipantLeases: Map<string, { expiresAt: number; token: string; name: string; metadata: string }>;
   maxParticipants: number;
   hostSecret: string;
   participantSecret: string;
@@ -317,8 +317,9 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
         });
         room.reservedParticipants -= 1;
         room.activeParticipants += 1;
-        room.activeParticipantLeases.set(participantId, { expiresAt: Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000) });
-        return { participantId, participantLeaseToken: isHost ? room.hostSecret : room.participantSecret, livekitUrl: options.config.livekitPublicUrl, token };
+        const participantLeaseToken = randomBytes(32).toString('base64url');
+        room.activeParticipantLeases.set(participantId, { expiresAt: Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000), token: participantLeaseToken, name: identity.nickname, metadata });
+        return { participantId, participantLeaseToken, livekitUrl: options.config.livekitPublicUrl, token };
       } catch (error) {
         if (!isRoomExpiredError(error)) {
           room.reservedParticipants -= 1;
@@ -383,7 +384,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (!room) return reply.code(404).send({ error: 'room_not_found' });
     const body = request.body as Record<string, unknown> | undefined;
     const leaseToken = typeof body?.participantLeaseToken === 'string' ? body.participantLeaseToken : typeof body?.participantToken === 'string' ? body.participantToken : undefined;
-    if (!secretMatches(leaseToken, room.participantSecret) && !secretMatches(leaseToken, room.hostSecret)) {
+    const lease = room.activeParticipantLeases.get(participantId);
+    if (!lease || !secretMatches(leaseToken, lease.token)) {
       return reply.code(403).send({ error: 'credential_invalid' });
     }
     if (room.activeParticipantLeases.delete(participantId)) room.activeParticipants -= 1;
@@ -396,8 +398,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (!room) return reply.code(404).send({ error: 'room_not_found' });
     const body = request.body as Record<string, unknown> | undefined;
     const leaseToken = typeof body?.participantLeaseToken === 'string' ? body.participantLeaseToken : undefined;
-    if (!secretMatches(leaseToken, room.participantSecret) && !secretMatches(leaseToken, room.hostSecret)) return reply.code(403).send({ error: 'credential_invalid' });
     const lease = room.activeParticipantLeases.get(participantId);
+    if (!lease || !secretMatches(leaseToken, lease.token)) return reply.code(403).send({ error: 'credential_invalid' });
     if (!lease || lease.expiresAt <= now()) return reply.code(404).send({ error: 'lease_expired' });
     if (now() >= room.expiresAt) {
       const refreshResult = await refreshExpiredRoom(roomId, room);
@@ -406,6 +408,37 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     }
     lease.expiresAt = Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000);
     return reply.code(200).send({ expiresAt: lease.expiresAt });
+  });
+
+  app.post('/api/rooms/:roomId/participants/:participantId/refresh-token', async (request, reply) => {
+    const { roomId, participantId } = request.params as { roomId: string; participantId: string };
+    const room = knownRooms.get(roomId);
+    if (!room) return reply.code(404).send({ error: 'room_not_found' });
+    const body = request.body as Record<string, unknown> | undefined;
+    const leaseToken = typeof body?.participantLeaseToken === 'string' ? body.participantLeaseToken : undefined;
+    const lease = room.activeParticipantLeases.get(participantId);
+    if (!lease || !secretMatches(leaseToken, lease.token)) return reply.code(403).send({ error: 'credential_invalid' });
+    if (lease.expiresAt <= now()) return reply.code(404).send({ error: 'lease_expired' });
+    if (now() >= room.expiresAt) {
+      const refreshResult = await refreshExpiredRoom(roomId, room);
+      if (refreshResult === 'missing') return reply.code(404).send({ error: 'room_not_found' });
+      if (refreshResult === 'unavailable' || refreshResult === 'timed_out') return reply.code(503).send({ error: 'room_service_unavailable' });
+    }
+    try {
+      const token = await options.livekit.createAccessToken({
+        participantId,
+        name: lease.name,
+        roomName: roomId,
+        metadata: lease.metadata,
+        grants: { roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share'] },
+        maximumTtlSeconds: options.config.tokenTtlSeconds,
+        expiresAtMs: room.expiresAt
+      });
+      lease.expiresAt = Math.min(room.expiresAt, now() + options.config.tokenTtlSeconds * 1_000);
+      return reply.code(200).send({ participantId, livekitUrl: options.config.livekitPublicUrl, token, expiresAt: lease.expiresAt });
+    } catch {
+      return reply.code(502).send({ error: 'token_service_unavailable' });
+    }
   });
 
   app.post('/api/rooms/:roomId/participants/:participantId/mute', async (request, reply) => {

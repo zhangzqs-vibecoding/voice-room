@@ -802,7 +802,7 @@ describe('voice room API', () => {
     const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
     expect(join.statusCode).toBe(200);
     const participantId = join.json().participantId;
-    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/leave`, payload: { participantToken } });
+    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/leave`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
     expect(leave.statusCode).toBe(204);
     const rejoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
     expect(rejoin.statusCode).toBe(200);
@@ -841,7 +841,7 @@ describe('voice room API', () => {
     const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
     const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
     const hostJoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'host', avatarId: 'owl', hostToken } });
-    expect(hostJoin.json().participantLeaseToken).toBe(hostToken);
+    expect(hostJoin.json().participantLeaseToken).not.toBe(hostToken);
     const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${hostJoin.json().participantId}/leave`, payload: { participantLeaseToken: hostJoin.json().participantLeaseToken } });
     expect(leave.statusCode).toBe(204);
     const guest = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
@@ -862,6 +862,36 @@ describe('voice room API', () => {
     const heartbeat = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/heartbeat`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
     expect(heartbeat.statusCode).toBe(200);
     expect(heartbeat.json().expiresAt).toBeGreaterThan(currentTime);
+    await app.close();
+  });
+
+  it('binds independent lease tokens to their own participants', async () => {
+    const { app } = buildApp({ config: { ...config, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } } });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const first = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    const second = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(first.json().participantLeaseToken).not.toBe(second.json().participantLeaseToken);
+    const misuse = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${first.json().participantId}/leave`, payload: { participantLeaseToken: second.json().participantLeaseToken } });
+    expect(misuse.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('refreshes a LiveKit token using the participant lease token', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    livekit.roomStillExists = true;
+    currentTime = 100_000;
+    const refreshed = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${join.json().participantId}/refresh-token`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json().token).toBeTruthy();
+    expect(refreshed.json().expiresAt).toBeGreaterThan(currentTime);
     await app.close();
   });
 
