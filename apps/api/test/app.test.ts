@@ -463,7 +463,8 @@ describe('voice room API', () => {
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
       payload: { nickname: 'extra', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
-    expect(additionalReconnect.statusCode).toBe(200);
+    expect(additionalReconnect.statusCode).toBe(409);
+    expect(additionalReconnect.json()).toEqual({ error: 'room_full' });
     await app.close();
   });
 
@@ -527,7 +528,8 @@ describe('voice room API', () => {
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
       payload: { nickname: 'reconnect', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
-    expect(reconnect.statusCode).toBe(200);
+    expect(reconnect.statusCode).toBe(409);
+    expect(reconnect.json()).toEqual({ error: 'room_full' });
     await app.close();
   });
 
@@ -775,6 +777,20 @@ describe('voice room API', () => {
     expect(body.hostUrl).toContain('hostToken=');
     expect(body.participantUrl).toContain('participantToken=');
     expect(livekit.createdRooms[0]).toMatchObject({ maxParticipants: 50 });
+    await app.close();
+  });
+
+  it('rejects the first join beyond the configured participant limit', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = (nickname: string) => app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname, avatarId: 'fox', participantToken } });
+    expect((await join('one')).statusCode).toBe(200);
+    expect((await join('two')).statusCode).toBe(200);
+    const overflow = await join('three');
+    expect(overflow.statusCode).toBe(409);
+    expect(overflow.json()).toEqual({ error: 'room_full' });
     await app.close();
   });
 

@@ -59,6 +59,8 @@ const MAX_PARTICIPANTS = 50;
 interface RoomState {
   expiresAt: number;
   reservedParticipants: number;
+  activeParticipants: number;
+  activeParticipantIds: Set<string>;
   maxParticipants: number;
   hostSecret: string;
   participantSecret: string;
@@ -248,7 +250,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
       await withLiveKitDeadline((signal) => options.livekit.createRoom({ name: roomId, maxParticipants, emptyTimeout: 300, departureTimeout: 300 }, signal));
       const hostSecret = createHostSecret();
       const participantSecret = createParticipantSecret();
-      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0, maxParticipants, hostSecret, participantSecret, locked: false });
+      knownRooms.set(roomId, { expiresAt: now() + ROOM_LINK_LIFETIME_MS, reservedParticipants: 0, activeParticipants: 0, activeParticipantIds: new Set(), maxParticipants, hostSecret, participantSecret, locked: false });
       return reply.code(201).send({
         roomId,
         hostUrl: `/meeting/${roomId}?hostToken=${encodeURIComponent(hostSecret)}`,
@@ -282,7 +284,7 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
     if (room.locked && !isHost) return reply.code(409).send({ error: 'room_locked' });
     const identity = parseJoin(request.body);
     if (!identity) return reply.code(400).send({ error: 'invalid_join_request' });
-    if (room.reservedParticipants >= room.maxParticipants) {
+    if (room.reservedParticipants + room.activeParticipants >= room.maxParticipants) {
       return reply.code(409).send({ error: 'room_full' });
     }
 
@@ -309,6 +311,8 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
           expiresAtMs: room.expiresAt
         });
         room.reservedParticipants -= 1;
+        room.activeParticipants += 1;
+        room.activeParticipantIds.add(participantId);
         return { participantId, livekitUrl: options.config.livekitPublicUrl, token };
       } catch (error) {
         if (!isRoomExpiredError(error)) {
@@ -357,9 +361,11 @@ export const createApp = (options: CreateAppOptions): FastifyInstance => {
 
   app.post('/api/rooms/:roomId/participants/:participantId/remove', async (request, reply) => {
     const { roomId, participantId } = request.params as { roomId: string; participantId: string };
-    if (!requireHost(request, roomId, reply)) return;
+    const room = requireHost(request, roomId, reply);
+    if (!room) return;
     try {
       await options.livekit.removeParticipant(roomId, participantId);
+      if (room.activeParticipantIds.delete(participantId)) room.activeParticipants -= 1;
       return reply.code(204).send();
     } catch {
       return reply.code(502).send({ error: 'room_service_unavailable' });
