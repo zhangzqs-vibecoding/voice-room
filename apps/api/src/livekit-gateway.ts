@@ -29,7 +29,7 @@ export class LiveKitServerGateway implements LiveKitGateway {
     name: string;
     roomName: string;
     metadata: string;
-    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: false; canPublishSources: ['microphone'] };
+    grants: { roomJoin: true; canPublish: true; canSubscribe: true; canPublishData: boolean; canPublishSources: string[]; roomAdmin?: true };
     maximumTtlSeconds: number;
     expiresAtMs: number;
   }): Promise<string> {
@@ -40,7 +40,7 @@ export class LiveKitServerGateway implements LiveKitGateway {
     return new SignJWT({
       name: input.name,
       metadata: input.metadata,
-      video: { ...input.grants, room: input.roomName, canPublishData: false, canPublishSources: ['microphone'] }
+      video: { ...input.grants, room: input.roomName }
     })
       .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
       .setIssuer(this.config.apiKey)
@@ -49,6 +49,21 @@ export class LiveKitServerGateway implements LiveKitGateway {
       .setNotBefore(issuedAtSeconds)
       .setExpirationTime(expiresAt)
       .sign(createSecretKey(Buffer.from(this.config.apiSecret, 'utf8')));
+  }
+
+  async removeParticipant(roomName: string, participantId: string): Promise<void> {
+    await this.roomService.removeParticipant(roomName, participantId);
+  }
+
+  async mutePublishedTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void> {
+    await this.roomService.mutePublishedTrack(roomName, participantId, trackSid, muted);
+  }
+  async muteCameraTrack(roomName: string, participantId: string, trackSid: string, muted: boolean): Promise<void> {
+    await this.roomService.mutePublishedTrack(roomName, participantId, trackSid, muted);
+  }
+
+  async deleteRoom(roomName: string): Promise<void> {
+    await this.roomService.deleteRoom(roomName);
   }
 
   async roomExists(roomName: string, signal?: AbortSignal): Promise<boolean> {

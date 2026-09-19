@@ -37,6 +37,9 @@ class FakeLiveKitGateway implements LiveKitGateway {
   deferTokenSigning = false;
   private readonly pendingRoomCreationResolutions: Array<() => void> = [];
   private readonly pendingTokenResolutions: Array<() => void> = [];
+  removedParticipants: Array<{ room: string; identity: string }> = [];
+  mutedTracks: Array<{ room: string; identity: string; trackSid: string; muted: boolean }> = [];
+  deletedRooms: string[] = [];
 
   async createRoom(options: Record<string, unknown>) {
     if (this.shouldFailCreate) throw new Error('LiveKit unavailable');
@@ -87,6 +90,18 @@ class FakeLiveKitGateway implements LiveKitGateway {
     if (this.slowRoomIds.has(roomName)) await new Promise((resolve) => setTimeout(resolve, this.roomExistsDelayMs));
     return this.existingRoomIds.size > 0 ? this.existingRoomIds.has(roomName) : this.roomStillExists;
   }
+
+  async removeParticipant(room: string, identity: string) {
+    this.removedParticipants.push({ room, identity });
+  }
+
+  async mutePublishedTrack(room: string, identity: string, trackSid: string, muted: boolean) {
+    this.mutedTracks.push({ room, identity, trackSid, muted });
+  }
+
+  async deleteRoom(room: string) {
+    this.deletedRooms.push(room);
+  }
 }
 
 const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
@@ -96,6 +111,7 @@ const buildApp = (overrides: Partial<Parameters<typeof createApp>[0]> = {}) => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 }, ...overrides.config },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
+      participantSecret: () => 'participant-test-secret',
       ...overrides
     }),
     livekit
@@ -155,7 +171,7 @@ describe('voice room API', () => {
     const { app, livekit } = buildApp();
     const response = await app.inject({ method: 'POST', url: '/api/rooms' });
     expect(response.statusCode).toBe(201);
-    expect(response.json()).toEqual({ roomId: 'room_abcdefghijklmnopqrstuv' });
+    expect(response.json()).toMatchObject({ roomId: 'room_abcdefghijklmnopqrstuv', hostUrl: expect.any(String), participantUrl: expect.any(String) });
     expect(livekit.createdRooms).toEqual([{ name: 'room_abcdefghijklmnopqrstuv', maxParticipants: 10, emptyTimeout: 300, departureTimeout: 300 }]);
     await app.close();
   });
@@ -208,14 +224,14 @@ describe('voice room API', () => {
   it('issues a scoped token for a known room and accepted identity', async () => {
     const { app } = buildApp();
     await app.inject({ method: 'POST', url: '/api/rooms' });
-    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: '  小王  ', avatarId: 'fox' } });
+    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: '  小王  ', avatarId: 'fox', participantToken: 'participant-test-secret' } });
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.participantId).toMatch(/^participant_[a-z0-9]{20,}$/);
     expect(body.livekitUrl).toBe('wss://public-livekit.test');
     const token = JSON.parse(body.token);
     expect(token.roomName).toBe('room_abcdefghijklmnopqrstuv');
-    expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: false, canPublishSources: ['microphone'] });
+    expect(token.grants).toEqual({ roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true, canPublishSources: ['microphone', 'camera', 'screen_share'] });
     expect(token.metadata).toBe(JSON.stringify({ nickname: '小王', avatarId: 'fox' }));
     expect(token.maximumTtlSeconds).toBe(900);
     expect(token.expiresAtMs).toBeGreaterThan(Date.now());
@@ -230,7 +246,7 @@ describe('voice room API', () => {
   ])('rejects invalid join input', async (payload) => {
     const { app } = buildApp();
     await app.inject({ method: 'POST', url: '/api/rooms' });
-    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload });
+    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { ...payload, participantToken: 'participant-test-secret' } });
     expect(response.statusCode).toBe(400);
     await app.close();
   });
@@ -276,7 +292,7 @@ describe('voice room API', () => {
 
   it('rejects joins to a room the API did not create', async () => {
     const { app } = buildApp();
-    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: 'Lee', avatarId: 'fox' } });
+    const response = await app.inject({ method: 'POST', url: '/api/rooms/room_abcdefghijklmnopqrstuv/join', payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' } });
     expect(response.statusCode).toBe(404);
     await app.close();
   });
@@ -288,14 +304,15 @@ describe('voice room API', () => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     currentTime = 300_000;
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: 'room_not_found' });
@@ -309,7 +326,8 @@ describe('voice room API', () => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     livekit.roomStillExists = true;
@@ -317,7 +335,7 @@ describe('voice room API', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens[0]?.expiresAtMs).toBe(600_000);
@@ -331,7 +349,8 @@ describe('voice room API', () => {
       config: { ...config, livekitRequestTimeoutMs: 15, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     const roomId = livekit.createdRooms[0]?.name as string;
@@ -339,7 +358,7 @@ describe('voice room API', () => {
     livekit.abortIgnoringRoomIds.add(roomId);
     currentTime = 300_000;
     const startedAt = Date.now();
-    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox' } });
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' } });
     expect(Date.now() - startedAt).toBeLessThan(200);
     expect(response.statusCode).toBe(503);
     await app.close();
@@ -352,14 +371,15 @@ describe('voice room API', () => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     currentTime = 299_000;
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens).toHaveLength(1);
@@ -375,14 +395,15 @@ describe('voice room API', () => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     currentTime = 299_001;
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(404);
     expect(livekit.createdTokens).toHaveLength(0);
@@ -397,14 +418,15 @@ describe('voice room API', () => {
       config: { ...config, rateLimit: { max: 30, timeWindowMs: 60_000, maxKeys: 1_000 } },
       livekit,
       roomId: () => 'room_abcdefghijklmnopqrstuv',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     await app.inject({ method: 'POST', url: '/api/rooms' });
     currentTime = 299_001;
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens[0]?.expiresAtMs).toBe(599_001);
@@ -418,7 +440,7 @@ describe('voice room API', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-        payload: { nickname: `member-${index}`, avatarId: 'fox' }
+        payload: { nickname: `member-${index}`, avatarId: 'fox', participantToken: 'participant-test-secret' }
       });
       expect(response.statusCode).toBe(200);
     }
@@ -426,22 +448,23 @@ describe('voice room API', () => {
     const failed = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'will-fail', avatarId: 'fox' }
+      payload: { nickname: 'will-fail', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(failed.statusCode).toBe(502);
     livekit.shouldFailToken = false;
     const recovered = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'recovered', avatarId: 'fox' }
+      payload: { nickname: 'recovered', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(recovered.statusCode).toBe(200);
     const additionalReconnect = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'extra', avatarId: 'fox' }
+      payload: { nickname: 'extra', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
-    expect(additionalReconnect.statusCode).toBe(200);
+    expect(additionalReconnect.statusCode).toBe(409);
+    expect(additionalReconnect.json()).toEqual({ error: 'room_full' });
     await app.close();
   });
 
@@ -452,14 +475,14 @@ describe('voice room API', () => {
     const expired = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(expired.statusCode).toBe(404);
     livekit.shouldExpireToken = false;
     const retry = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(retry.statusCode).toBe(404);
     expect(livekit.createdTokens).toHaveLength(0);
@@ -474,7 +497,7 @@ describe('voice room API', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'Lee', avatarId: 'fox' }
+      payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
     expect(response.statusCode).toBe(200);
     expect(livekit.createdTokens).toHaveLength(1);
@@ -488,7 +511,7 @@ describe('voice room API', () => {
     const pendingResponses = Array.from({ length: 11 }, (_, index) => app.inject({
         method: 'POST',
         url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-        payload: { nickname: `member-${index}`, avatarId: 'fox' }
+        payload: { nickname: `member-${index}`, avatarId: 'fox', participantToken: 'participant-test-secret' }
       }));
     for (let attempt = 0; attempt < 10 && livekit.createdTokens.length < 10; attempt += 1) {
       await new Promise((resolve) => setImmediate(resolve));
@@ -503,9 +526,10 @@ describe('voice room API', () => {
     const reconnect = await app.inject({
       method: 'POST',
       url: '/api/rooms/room_abcdefghijklmnopqrstuv/join',
-      payload: { nickname: 'reconnect', avatarId: 'fox' }
+      payload: { nickname: 'reconnect', avatarId: 'fox', participantToken: 'participant-test-secret' }
     });
-    expect(reconnect.statusCode).toBe(200);
+    expect(reconnect.statusCode).toBe(409);
+    expect(reconnect.json()).toEqual({ error: 'room_full' });
     await app.close();
   });
 
@@ -613,7 +637,8 @@ describe('voice room API', () => {
       config: { ...config, roomCacheMaxEntries: 26, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } },
       livekit,
       roomId: () => roomIds.shift() ?? 'room_zzzzzzzzzzzzzzzzzzzz',
-      now: () => currentTime
+      now: () => currentTime,
+      participantSecret: () => 'participant-test-secret'
     });
     for (let index = 0; index < 26; index += 1) expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
     const targetRoomId = livekit.createdRooms[25]?.name as string;
@@ -621,7 +646,7 @@ describe('voice room API', () => {
     for (const room of livekit.createdRooms.slice(0, 25)) livekit.slowRoomIds.add(room.name as string);
     livekit.roomExistsDelayMs = 50;
     currentTime = 300_000;
-    const response = await app.inject({ method: 'POST', url: `/api/rooms/${targetRoomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox' } });
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${targetRoomId}/join`, payload: { nickname: 'Lee', avatarId: 'fox', participantToken: 'participant-test-secret' } });
     expect(response.statusCode).toBe(200);
     expect(livekit.roomExistsCalls).toEqual([targetRoomId]);
     await app.close();
@@ -738,6 +763,221 @@ describe('voice room API', () => {
     expect(livekit.abortedRoomExistsQueries).toBeGreaterThan(0);
     livekit.neverResolvingRoomIds.clear();
     expect((await app.inject({ method: 'POST', url: '/api/rooms' })).statusCode).toBe(201);
+    await app.close();
+  });
+
+  it('creates a configurable room with separate host and participant links', async () => {
+    const { app, livekit } = buildApp();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 50 } });
+    expect(response.statusCode).toBe(201);
+    const body = response.json();
+    expect(body.hostUrl).toMatch(/^\/meeting\//);
+    expect(body.participantUrl).toMatch(/^\/meeting\//);
+    expect(body.hostUrl).not.toBe(body.participantUrl);
+    expect(body.hostUrl).toContain('hostToken=');
+    expect(body.participantUrl).toContain('participantToken=');
+    expect(livekit.createdRooms[0]).toMatchObject({ maxParticipants: 50 });
+    await app.close();
+  });
+
+  it('rejects the first join beyond the configured participant limit', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = (nickname: string) => app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname, avatarId: 'fox', participantToken } });
+    expect((await join('one')).statusCode).toBe(200);
+    expect((await join('two')).statusCode).toBe(200);
+    const overflow = await join('three');
+    expect(overflow.statusCode).toBe(409);
+    expect(overflow.json()).toEqual({ error: 'room_full' });
+    await app.close();
+  });
+
+  it('releases a participant lease when the participant leaves', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    const participantId = join.json().participantId;
+    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/leave`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(leave.statusCode).toBe(204);
+    const rejoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(rejoin.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('reclaims an expired participant lease before checking room capacity', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    livekit.roomStillExists = true;
+    currentTime = 301_000;
+    const rejoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(rejoin.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('rejects leave with an invalid participant credential', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId } = created.json();
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/participant_123/leave`, payload: { participantToken: 'invalid' } });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'credential_invalid' });
+    await app.close();
+  });
+
+  it('returns a host lease token and releases the host lease on leave', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, hostUrl, participantUrl } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const hostJoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'host', avatarId: 'owl', hostToken } });
+    expect(hostJoin.json().participantLeaseToken).not.toBe(hostToken);
+    const leave = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${hostJoin.json().participantId}/leave`, payload: { participantLeaseToken: hostJoin.json().participantLeaseToken } });
+    expect(leave.statusCode).toBe(204);
+    const guest = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    expect(guest.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('renews a participant lease with a valid heartbeat token', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    const participantId = join.json().participantId;
+    livekit.roomStillExists = true;
+    currentTime = 100_000;
+    const heartbeat = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${participantId}/heartbeat`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(heartbeat.statusCode).toBe(200);
+    expect(heartbeat.json().expiresAt).toBeGreaterThan(currentTime);
+    await app.close();
+  });
+
+  it('binds independent lease tokens to their own participants', async () => {
+    const { app } = buildApp({ config: { ...config, rateLimit: { max: 100, timeWindowMs: 60_000, maxKeys: 100 } } });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 2 } });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const first = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'one', avatarId: 'fox', participantToken } });
+    const second = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'two', avatarId: 'fox', participantToken } });
+    expect(first.json().participantLeaseToken).not.toBe(second.json().participantLeaseToken);
+    const misuse = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${first.json().participantId}/leave`, payload: { participantLeaseToken: second.json().participantLeaseToken } });
+    expect(misuse.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it('refreshes a LiveKit token using the participant lease token', async () => {
+    let currentTime = 0;
+    const { app, livekit } = buildApp({ now: () => currentTime });
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'guest', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(200);
+    livekit.roomStillExists = true;
+    currentTime = 100_000;
+    const refreshed = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/${join.json().participantId}/refresh-token`, payload: { participantLeaseToken: join.json().participantLeaseToken } });
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json().token).toBeTruthy();
+    expect(refreshed.json().expiresAt).toBeGreaterThan(currentTime);
+    await app.close();
+  });
+
+  it.each([1, 51, 2.5, '20', null])('rejects invalid maxParticipants %j', async (maxParticipants) => {
+    const { app, livekit } = buildApp();
+    const response = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: 'invalid_max_participants' });
+    expect(livekit.createdRooms).toHaveLength(0);
+    await app.close();
+  });
+
+  it('issues host grants only when joining with the host link credential', async () => {
+    const { app, livekit } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms', payload: { maxParticipants: 10 } });
+    const { hostUrl, participantUrl, roomId } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const hostJoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Host', avatarId: 'owl', hostToken } });
+    const participantJoin = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Guest', avatarId: 'fox', participantToken } });
+    expect(hostJoin.statusCode).toBe(200);
+    expect(participantJoin.statusCode).toBe(200);
+    expect(livekit.createdTokens[0]?.grants).toMatchObject({ roomAdmin: true });
+    expect(livekit.createdTokens[1]?.grants).not.toHaveProperty('roomAdmin');
+    await app.close();
+  });
+
+  it('rejects a join without a link credential', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${created.json().roomId}/join`, payload: { nickname: 'Guest', avatarId: 'fox' } });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'credential_invalid' });
+    await app.close();
+  });
+
+  it('rejects a join with an invalid link credential', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${created.json().roomId}/join`, payload: { nickname: 'Guest', avatarId: 'fox', participantToken: 'invalid' } });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'credential_invalid' });
+    await app.close();
+  });
+
+  it('rejects host controls with a participant credential', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, participantUrl } = created.json();
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const response = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/lock`, payload: { hostToken: participantToken } });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: 'host_forbidden' });
+    await app.close();
+  });
+
+  it('locks a room and rejects new participant joins until unlocked', async () => {
+    const { app } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, hostUrl, participantUrl } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const participantToken = new URL(participantUrl, 'https://meeting.test').searchParams.get('participantToken');
+    const locked = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/lock`, payload: { hostToken, locked: true } });
+    expect(locked.statusCode).toBe(200);
+    const join = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/join`, payload: { nickname: 'Guest', avatarId: 'fox', participantToken } });
+    expect(join.statusCode).toBe(409);
+    expect(join.json()).toEqual({ error: 'room_locked' });
+    await app.close();
+  });
+
+  it('allows a host to remove and mute a participant, and end the room', async () => {
+    const { app, livekit } = buildApp();
+    const created = await app.inject({ method: 'POST', url: '/api/rooms' });
+    const { roomId, hostUrl } = created.json();
+    const hostToken = new URL(hostUrl, 'https://meeting.test').searchParams.get('hostToken');
+    const remove = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/remove`, payload: { hostToken } });
+    const mute = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/mute`, payload: { hostToken, trackSid: 'TR_1', muted: true } });
+    const camera = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/participants/member-1/camera`, payload: { hostToken, trackSid: 'TR_CAM_1', muted: true } });
+    const end = await app.inject({ method: 'POST', url: `/api/rooms/${roomId}/end`, payload: { hostToken } });
+    expect(remove.statusCode).toBe(204);
+    expect(mute.statusCode).toBe(204);
+    expect(camera.statusCode).toBe(204);
+    expect(end.statusCode).toBe(204);
+    expect(livekit.removedParticipants).toEqual([{ room: roomId, identity: 'member-1' }]);
+    expect(livekit.mutedTracks).toEqual([{ room: roomId, identity: 'member-1', trackSid: 'TR_1', muted: true }, { room: roomId, identity: 'member-1', trackSid: 'TR_CAM_1', muted: true }]);
+    expect(livekit.deletedRooms).toEqual([roomId]);
     await app.close();
   });
 });

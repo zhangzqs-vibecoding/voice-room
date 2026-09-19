@@ -1,0 +1,50 @@
+{
+  auto_https disable_redirects
+  https_port 8443
+
+  layer4 {
+    :443 {
+      @app tls sni vps-jp.zhangzqs.cn
+      route @app {
+        tls {
+          connection_policy {
+            alpn http/1.1
+          }
+        }
+        proxy web:8080
+      }
+
+      @livekit tls sni livekit.vps-jp.zhangzqs.cn
+      route @livekit {
+        tls {
+          connection_policy {
+            alpn http/1.1
+          }
+        }
+        proxy livekit:7880
+      }
+
+      @turn tls sni turn.vps-jp.zhangzqs.cn
+      route @turn {
+        tls
+        proxy livekit:443
+      }
+    }
+  }
+}
+
+http://vps-jp.zhangzqs.cn {
+  redir https://vps-jp.zhangzqs.cn{uri} permanent
+}
+
+vps-jp.zhangzqs.cn:8443 {
+  respond "edge TLS is handled by Layer 4" 421
+}
+
+livekit.vps-jp.zhangzqs.cn:8443 {
+  respond "edge TLS is handled by Layer 4" 421
+}
+
+turn.vps-jp.zhangzqs.cn:8443 {
+  respond "edge TLS is handled by Layer 4" 421
+}
