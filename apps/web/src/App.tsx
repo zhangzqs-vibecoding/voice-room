@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createRoom, joinRoom, releaseParticipant, type JoinResponse } from './api.js';
+import { createRoom, heartbeatParticipant, joinRoom, releaseParticipant, type JoinResponse } from './api.js';
 import { AudioSession, type SessionAdapter, type SessionState } from './audio-session.js';
 import { LiveKitSessionAdapter } from './livekit-session.js';
 import { MeetingControls } from './meeting-controls.js';
@@ -101,7 +101,9 @@ export const Room = ({ roomId, nickname, avatarId, listenOnly, members, deviceId
     if (!credentials) return;
     const next = new AudioSession(sessionFactoryRef.current(), setState); session.current = next;
     void next.enter({ ...credentials, listenOnly, mode, deviceId }).then(() => listenOnly ? undefined : next.startCamera()).catch((error) => setControlError(error instanceof Error && error.message === 'video_not_supported' ? '摄像头不可用，请检查浏览器权限。' : '会议连接失败，请重试。'));
-    return () => { void releaseParticipant(roomId, credentials.participantId, tokenFromPath('participantToken') ?? tokenFromPath('hostToken') ?? '').catch(() => undefined).finally(() => next.leave().catch(() => undefined)); };
+    const leaseToken = credentials.participantLeaseToken;
+    const heartbeat = leaseToken ? window.setInterval(() => { void heartbeatParticipant(roomId, credentials.participantId, leaseToken).catch(() => undefined); }, 60_000) : undefined;
+    return () => { if (heartbeat !== undefined) window.clearInterval(heartbeat); if (leaseToken) void releaseParticipant(roomId, credentials.participantId, leaseToken).catch(() => undefined); void next.leave().catch(() => undefined); };
   }, [credentials?.livekitUrl, credentials?.participantId, credentials?.token]);
   useEffect(() => {
     if (listenOnly || !navigator.mediaDevices?.enumerateDevices) return;
